@@ -1,0 +1,28 @@
+{
+  "project_id": "00000000-0000-0000-0000-000000000000",
+  "name": "Replace with protocol-specific gold set",
+  "version": "1.0.0-draft",
+  "description": "Draft until independent annotation and adjudication are complete.",
+  "status": "DRAFT",
+  "provenance": null,
+  "cases": [
+    {
+      "case_id": "paper-001",
+      "title": "Replace with verified paper title",
+      "doi": null,
+      "relevant": true,
+      "relevance_grade": 3,
+      "expected_date": null,
+      "expected_venue": null,
+      "allowed_quote_sha256": [],
+      "expected_numeric_values": []
+    }
+  ],
+  "observations": [
+    {
+      "source": "crossref",
+      "source_id": "replace-with-source-id",
+      "expected_cluster_id": "paper-001"
+    }
+  ]
+}

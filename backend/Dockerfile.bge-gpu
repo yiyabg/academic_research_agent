@@ -1,0 +1,19 @@
+# Dedicated CUDA image for the two local-paper BGE HTTP services.
+#
+# The main backend image intentionally uses CPU PyTorch so API and ordinary
+# workers do not pull CUDA libraries.  This derived image replaces only torch;
+# it is used exclusively by bge-embedding and bge-reranker.
+FROM academic_research_agent_backend:dev
+
+USER root
+
+ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu128
+ARG PYTORCH_CUDA_VERSION=2.7.1
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /app/.venv/bin/python -m ensurepip --upgrade && \
+    /app/.venv/bin/python -m pip install --upgrade --force-reinstall \
+      --index-url=${PYTORCH_CUDA_INDEX} torch==${PYTORCH_CUDA_VERSION} && \
+    /app/.venv/bin/python -c "import torch; assert torch.version.cuda, torch.__version__"
+
+USER appuser

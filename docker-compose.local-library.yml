@@ -1,0 +1,24 @@
+# Optional, explicit overlay for the administrator's read-only Zotero export.
+#
+# Create/add this line to backend/.env (the path is on the Docker HOST):
+#   LOCAL_PAPER_LIBRARY_HOST_PATH=/home/cumt/lly/zotero_local_database
+#
+# Start with:
+# docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.research.yml
+#   -f docker-compose.local-library.yml up -d
+#
+# No process receives write permission for this mount.  Do not use this overlay
+# until the folder contains the Better BibTeX .bib file and `files/` hierarchy.
+services:
+  app:
+    volumes:
+      - ${LOCAL_PAPER_LIBRARY_HOST_PATH:?Set LOCAL_PAPER_LIBRARY_HOST_PATH in backend/.env}:/zotero_local_database:ro
+    environment:
+      - LOCAL_PAPER_LIBRARY_ROOT=/zotero_local_database
+
+  research-worker-cpu:
+    volumes:
+      - models_cache:/app/models_cache
+      - ${LOCAL_PAPER_LIBRARY_HOST_PATH:?Set LOCAL_PAPER_LIBRARY_HOST_PATH in backend/.env}:/zotero_local_database:ro
+    environment:
+      - LOCAL_PAPER_LIBRARY_ROOT=/zotero_local_database

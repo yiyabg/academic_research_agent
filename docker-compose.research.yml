@@ -1,0 +1,298 @@
+# Research production topology overlay.
+# Usage: docker compose --env-file backend/.env -f docker-compose.yml \
+#          -f docker-compose.research.yml up -d
+
+services:
+  app:
+    volumes:
+      - ./backend/scripts:/app/scripts:ro
+      - ./backend/app:/app/app:ro
+      - models_cache:/app/models_cache
+      # The API validates this mounted source before it can queue a sync.
+      - ${LOCAL_PAPER_LIBRARY_HOST_PATH:?set_LOCAL_PAPER_LIBRARY_HOST_PATH}:/zotero_local_database:ro
+    environment:
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-research-admin}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-change-me-research-storage}
+      - S3_BUCKET=${S3_BUCKET:-academic-research}
+      - GROBID_URL=http://grobid:8070
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - MODELS_CACHE_DIR=/app/models_cache
+      - HTTPS_PROXY=${RUNTIME_HTTPS_PROXY:-}
+      - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,db,redis,qdrant,minio,grobid,clamav,bge-embedding,bge-reranker}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      grobid:
+        condition: service_healthy
+      bge-embedding:
+        condition: service_healthy
+      bge-reranker:
+        condition: service_healthy
+
+  migrate:
+    image: academic_research_agent_backend:dev
+    pull_policy: never
+    command: alembic upgrade head
+    env_file: [./backend/.env]
+    # Development images may lag source migrations. Mount them with app/ so a
+    # running database is never upgraded by a stale Alembic revision graph.
+    volumes:
+      - ./backend/alembic:/app/alembic:ro
+    environment:
+      - POSTGRES_HOST=db
+    networks: [backend]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+
+  model-init:
+    image: academic_research_agent_backend:dev
+    pull_policy: never
+    command: python /app/scripts/preload_research_models.py
+    env_file: [./backend/.env]
+    environment:
+      - MODELS_CACHE_DIR=/app/models_cache
+      - HTTP_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
+      - HTTPS_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
+      - ALL_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
+    volumes:
+      # The preloader imports Settings and the local-library reranker.  Mount
+      # the same source tree as the API/CPU worker so an old development image
+      # cannot preload a different model configuration than the running code.
+      - ./backend/app:/app/app:ro
+      - ./backend/scripts:/app/scripts:ro
+      - models_cache:/app/models_cache
+    network_mode: host
+    restart: "no"
+
+  bge-embedding:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.bge-gpu
+    image: academic_research_agent_bge_gpu:dev
+    pull_policy: never
+    gpus: all
+    command: uvicorn app.services.literature_research.local_bge_model_servers:embedding_app --host 0.0.0.0 --port 8001
+    env_file: [./backend/.env]
+    environment:
+      - MODELS_CACHE_DIR=/app/models_cache
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,bge-embedding,bge-reranker}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LOCAL_PAPER_EMBEDDING_DEVICE=cuda
+      - LOCAL_PAPER_RERANKER_DEVICE=cuda
+      - LOCAL_PAPER_REQUIRE_CUDA=true
+    volumes:
+      - ./backend/app:/app/app:ro
+      - models_cache:/app/models_cache
+    networks: [backend]
+    depends_on:
+      model-init: {condition: service_completed_successfully}
+    expose: ["8001"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/healthz').raise_for_status()"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 2m
+
+  bge-reranker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.bge-gpu
+    image: academic_research_agent_bge_gpu:dev
+    pull_policy: never
+    gpus: all
+    command: uvicorn app.services.literature_research.local_bge_model_servers:reranker_app --host 0.0.0.0 --port 8002
+    env_file: [./backend/.env]
+    environment:
+      - MODELS_CACHE_DIR=/app/models_cache
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,bge-embedding,bge-reranker}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LOCAL_PAPER_EMBEDDING_DEVICE=cuda
+      - LOCAL_PAPER_RERANKER_DEVICE=cuda
+      - LOCAL_PAPER_REQUIRE_CUDA=true
+    volumes:
+      - ./backend/app:/app/app:ro
+      - models_cache:/app/models_cache
+    networks: [backend]
+    depends_on:
+      model-init: {condition: service_completed_successfully}
+    expose: ["8002"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8002/healthz').raise_for_status()"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 2m
+
+  celery_worker:
+    profiles: ["combined-worker"]
+
+  research-worker-io:
+    image: academic_research_agent_backend:dev
+    pull_policy: never
+    command: celery -A app.worker.celery_app worker --loglevel=info -Q research-io --concurrency=8
+    env_file: [./backend/.env]
+    environment: &research-worker-env
+      - POSTGRES_HOST=db
+      - REDIS_HOST=redis
+      - QDRANT_HOST=qdrant
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:-research-admin}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:-change-me-research-storage}
+      - S3_BUCKET=${S3_BUCKET:-academic-research}
+      - GROBID_URL=http://grobid:8070
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      # model-init has already materialized immutable snapshots in the shared
+      # volume; runtime workers must not pause to perform Hub revision checks.
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - HTTPS_PROXY=${RUNTIME_HTTPS_PROXY:-}
+      - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,db,redis,qdrant,minio,grobid,clamav,bge-embedding,bge-reranker}
+    networks: [backend]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      app: {condition: service_started}
+      minio-init: {condition: service_completed_successfully}
+      clamav: {condition: service_healthy}
+    restart: unless-stopped
+    healthcheck: {disable: true}
+
+  research-worker-cpu:
+    image: academic_research_agent_backend:dev
+    pull_policy: never
+    # PyTorch/tokenizers are not fork-safe after Celery imports the task graph.
+    # A solo worker avoids post-fork model-loader deadlocks; torch still uses
+    # its own native CPU thread pool for inference.
+    command: celery -A app.worker.celery_app worker --loglevel=info -Q research-cpu --pool=solo --concurrency=1
+    env_file: [./backend/.env]
+    # Keep development worker code aligned with the reloadable API service.
+    # The local-library sync task runs here, so its parser/indexer must not lag
+    # behind app/ when source code changes without an image rebuild.
+    volumes:
+      - ./backend/app:/app/app:ro
+      - models_cache:/app/models_cache
+      # The CPU sync task parses this administrator-managed corpus read-only.
+      - ${LOCAL_PAPER_LIBRARY_HOST_PATH:?set_LOCAL_PAPER_LIBRARY_HOST_PATH}:/zotero_local_database:ro
+    environment: *research-worker-env
+    networks: [backend]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      model-init: {condition: service_completed_successfully}
+      app: {condition: service_started}
+      grobid: {condition: service_healthy}
+      bge-embedding: {condition: service_healthy}
+      bge-reranker: {condition: service_healthy}
+    restart: unless-stopped
+    healthcheck: {disable: true}
+
+  research-worker-llm:
+    image: academic_research_agent_backend:dev
+    pull_policy: never
+    command: celery -A app.worker.celery_app worker --loglevel=info -Q research-llm,paper-analysis --concurrency=4
+    env_file: [./backend/.env]
+    volumes: [models_cache:/app/models_cache]
+    environment: *research-worker-env
+    networks: [backend]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      app: {condition: service_started}
+    restart: unless-stopped
+    healthcheck: {disable: true}
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-research-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-change-me-research-storage}
+    volumes: [minio_data:/data]
+    ports:
+      - "${MINIO_API_EXPOSE_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_EXPOSE_PORT:-9001}:9001"
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "local/$${S3_BUCKET}" &&
+        mc anonymous set none "local/$${S3_BUCKET}"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-research-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-change-me-research-storage}
+      - S3_BUCKET=${S3_BUCKET:-academic-research}
+    networks: [backend]
+    depends_on:
+      minio: {condition: service_healthy}
+
+  grobid:
+    image: lfoppiano/grobid:0.8.2
+    environment:
+      # Some Docker-in-Docker/cgroup-v2 hosts expose no usable controller
+      # mount to this JDK, which otherwise crashes before GROBID starts.
+      - JAVA_TOOL_OPTIONS=-XX:-UseContainerSupport -Xms512m -Xmx4g
+    ports: ["${GROBID_EXPOSE_PORT:-8070}:8070"]
+    networks: [backend]
+    healthcheck:
+      # The upstream image has bash but no wget/curl.
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/8070"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:1.4
+    volumes: [clamav_data:/var/lib/clamav]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  models_cache:
+  clamav_data:
