@@ -26,6 +26,18 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# Docling's layout pipeline imports Transformers image utilities, so the CPU
+# worker requires torchvision.  The generic PyPI wheel lacks the operators of
+# the matching CPU torch wheel in this environment; take the paired binary
+# from the official PyTorch CPU index instead.  Dockerfile.bge-gpu deliberately
+# removes torchvision after replacing torch with CUDA because BGE is text-only.
+ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCHVISION_CPU_VERSION=0.28.0+cpu
+RUN /app/.venv/bin/python -m ensurepip --upgrade && \
+    /app/.venv/bin/python -m pip install --upgrade --force-reinstall --no-deps \
+      --index-url=${PYTORCH_CPU_INDEX} torchvision==${TORCHVISION_CPU_VERSION} && \
+    /app/.venv/bin/python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__)"
+
 
 # Runtime stage
 FROM python:3.12-slim
@@ -40,7 +52,7 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' \
         -o Acquire::Retries=3 update && \
     apt-get -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 \
         -o Acquire::Retries=3 install -y --no-install-recommends \
-        tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim && \
+        libgl1 tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim && \
     rm -rf /var/lib/apt/lists/*
 
 # Create the runtime identity before copying, then copy the builder output only

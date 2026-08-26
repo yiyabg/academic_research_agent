@@ -55,10 +55,15 @@ dependencies = [
     "rank-bm25>=0.2.2",
     # Uses existing openai dependency
     "sentence-transformers>=3.0.0",
+    # BGE-M3 is served through sentence-transformers. Transformers 5.x breaks
+    # its PreTrainedModel import path in the current CUDA image; Docling works
+    # with 4.x, so keep one compatible runtime for both services.
+    "transformers>=4.41,<5",
     # Keep general-purpose API/I/O containers CPU-only; a GPU worker can use
     # a dedicated image instead of pulling CUDA runtimes into every service.
     "torch>=2.7,<3",
     "pymupdf>=1.25.0",
+    "docling>=2.0.0",
     "pillow>=10.0.0",
     "python-docx>=1.1.0",
     "llama-cloud>=1.0.0",

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html as html_lib
+from dataclasses import dataclass
+from typing import Any
 
 from pydantic_ai import Agent
 
@@ -125,6 +127,16 @@ OPML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 </opml>"""
 
 
+@dataclass(frozen=True)
+class DeepAnalysisResult:
+    """Outcome preserving whether the report is a model result or an evidence fallback."""
+
+    content: str
+    filename: str
+    generated_by_llm: bool
+    fallback_reason: str | None = None
+
+
 class PaperMindmapService:
     """Deep academic analysis: per-paper structured breakdown + cross-paper comparison."""
 
@@ -136,27 +148,64 @@ class PaperMindmapService:
         output_format: str = "markdown",
     ) -> tuple[str, str]:
         """Return (content, filename). output_format: markdown | opml"""
+        detailed = await self.analyze_detailed(
+            papers=papers, question=question, output_format=output_format
+        )
+        return detailed.content, detailed.filename
+
+    async def analyze_detailed(
+        self,
+        *,
+        papers: list[LocalPaperRead],
+        question: str,
+        output_format: str = "markdown",
+        model: Any | None = None,
+        timeout_seconds: float = 180.0,
+    ) -> DeepAnalysisResult:
+        """Produce a report while retaining the original LLM failure for audit."""
         if not papers:
-            return "# 无论文可分析\n\n没有检索到符合条件的论文，请调整检索词后重试。", "mindmap.md"
+            return DeepAnalysisResult(
+                content="# 无论文可分析\n\n没有检索到符合条件的论文，请调整检索词后重试。",
+                filename="mindmap.md",
+                generated_by_llm=False,
+                fallback_reason="NO_PAPERS",
+            )
 
         evidence_text = self._build_rich_evidence(papers)
+        generated_by_llm = False
+        fallback_reason: str | None = None
 
-        if llm_is_configured():
+        if model is not None or llm_is_configured():
             try:
                 markdown_map = await self._deep_analyze_via_llm(
                     question=question,
                     evidence=evidence_text,
                     papers=papers,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
                 )
+                generated_by_llm = True
             except Exception as exc:
                 markdown_map = self._generate_structured_fallback(papers, question, str(exc))
+                fallback_reason = f"{type(exc).__name__}: {exc}"
         else:
             markdown_map = self._generate_structured_fallback(papers, question, "LLM未配置")
+            fallback_reason = "LLM_NOT_CONFIGURED"
 
         if output_format == "opml":
             opml_content = self._markdown_to_opml(markdown_map, question)
-            return opml_content, "deep-analysis-mindmap.opml"
-        return markdown_map, "deep-analysis-mindmap.md"
+            return DeepAnalysisResult(
+                content=opml_content,
+                filename="deep-analysis-mindmap.opml",
+                generated_by_llm=generated_by_llm,
+                fallback_reason=fallback_reason,
+            )
+        return DeepAnalysisResult(
+            content=markdown_map,
+            filename="deep-analysis-mindmap.md",
+            generated_by_llm=generated_by_llm,
+            fallback_reason=fallback_reason,
+        )
 
     def _build_rich_evidence(self, papers: list[LocalPaperRead]) -> str:
         """Build rich evidence with structured sections (Abstract/Intro/Conclusion) + chunks."""
@@ -241,12 +290,14 @@ class PaperMindmapService:
         question: str,
         evidence: str,
         papers: list[LocalPaperRead],
+        model: Any | None = None,
+        timeout_seconds: float = 180.0,
     ) -> str:
         import asyncio
 
         system_prompt = DEEP_ANALYSIS_SYSTEM_PROMPT.replace("{topic}", question)
         agent: Agent[str] = Agent(
-            model=build_llm_model(),
+            model=model or build_llm_model(),
             system_prompt=system_prompt,
         )
         user_prompt = (
@@ -257,28 +308,11 @@ class PaperMindmapService:
             "对于摘录不足以支撑分析的维度，明确标注[摘录不足]而非编造。"
         )
 
-        try:
-            # Add 3-minute timeout protection
-            result = await asyncio.wait_for(agent.run(user_prompt), timeout=180.0)
-            return result.output
-        except TimeoutError:
-            return (
-                f"# 深度分析超时\n\n"
-                f"为 {len(papers)} 篇论文生成深度分析需要较长时间（>3分钟），LLM调用超时。\n\n"
-                f"**建议**：\n"
-                f"1. 减少论文数量（当前 {len(papers)} 篇，建议 ≤5 篇）\n"
-                f"2. 稍后重试\n"
-                f"3. 检查 LLM 服务状态和网络连接\n\n"
-                f"**降级输出**：以下是元数据概览\n\n"
-                + self._generate_structured_fallback(papers, question, "LLM调用超时")
-            )
-        except Exception as e:
-            return (
-                f"# 深度分析失败\n\n"
-                f"生成过程中遇到错误：{e!s}\n\n"
-                f"**降级输出**：以下是元数据概览\n\n"
-                + self._generate_structured_fallback(papers, question, f"错误: {e!s}")
-            )
+        # Fallback belongs to ``analyze_detailed``.  Let this boundary retain
+        # the exception type so the job ledger can distinguish timeout,
+        # gateway failure and invalid model output.
+        result = await asyncio.wait_for(agent.run(user_prompt), timeout=timeout_seconds)
+        return result.output
 
     def _generate_structured_fallback(
         self, papers: list[LocalPaperRead], question: str, reason: str

@@ -63,6 +63,7 @@ export interface LocalPaper {
     bm25_score?: number | null;
     rrf_score?: number | null;
     rerank_score?: number | null;
+    mmr_score?: number | null;
     section_heading?: string | null;
     paragraph_index?: number | null;
     bbox?: number[] | null;
@@ -78,6 +79,29 @@ export interface LocalPaperSearchResponse {
   candidate_papers: number;
   rejected_by_score: number;
   insufficient_evidence: boolean;
+  retrieval_run_id?: string | null;
+  trace?: Record<string, unknown>;
+}
+
+export type LocalPaperAnalysisStatus =
+  | "QUEUED" | "RETRIEVING" | "ANALYZING" | "SYNTHESIZING" | "RENDERING"
+  | "COMPLETED" | "PARTIAL" | "FAILED" | "CANCELLED";
+
+export interface LocalPaperAnalysisJob {
+  id: string;
+  session_id: string;
+  library_id: string;
+  owner_id: string;
+  project_id?: string | null;
+  mode: string;
+  status: LocalPaperAnalysisStatus;
+  question: string;
+  retrieval_run_id?: string | null;
+  result: Record<string, unknown>;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at?: string | null;
 }
 
 export interface ResearchReadiness {

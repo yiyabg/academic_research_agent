@@ -7,8 +7,8 @@ an administrator-owned read-only directory and its evidence remains page-bound.
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -70,6 +70,9 @@ class LocalPaper(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="INDEXED", index=True)
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     text_characters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_document_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
 
     # Structured key sections for deep analysis
     abstract_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -88,14 +91,26 @@ class LocalPaper(Base, TimestampMixin):
     figures: Mapped[list["LocalPaperFigure"]] = relationship(
         "LocalPaperFigure", back_populates="paper", cascade="all, delete-orphan"
     )
+    tables: Mapped[list["LocalPaperTable"]] = relationship(
+        "LocalPaperTable", back_populates="paper", cascade="all, delete-orphan"
+    )
+    document_versions: Mapped[list["LocalPaperDocumentVersion"]] = relationship(
+        "LocalPaperDocumentVersion", back_populates="paper", cascade="all, delete-orphan"
+    )
 
 
-class LocalPaperSection(Base, TimestampMixin):
-    """Large, page-bound parent document preserving structure and location."""
+class LocalPaperDocumentVersion(Base, TimestampMixin):
+    """Immutable parser/chunker output for one local-paper source revision."""
 
-    __tablename__ = "local_paper_sections"
+    __tablename__ = "local_paper_document_versions"
     __table_args__ = (
-        UniqueConstraint("paper_id", "page_number", "section_index", name="uq_local_paper_section"),
+        UniqueConstraint(
+            "paper_id",
+            "source_sha256",
+            "parser_version",
+            "chunker_version",
+            name="uq_local_paper_document_version",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -105,6 +120,51 @@ class LocalPaperSection(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    parser_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    chunker_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="BUILDING", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    text_characters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    paper: Mapped["LocalPaper"] = relationship("LocalPaper", back_populates="document_versions")
+    sections: Mapped[list["LocalPaperSection"]] = relationship(
+        "LocalPaperSection", back_populates="document_version", cascade="all, delete-orphan"
+    )
+    chunks: Mapped[list["LocalPaperChunk"]] = relationship(
+        "LocalPaperChunk", back_populates="document_version", cascade="all, delete-orphan"
+    )
+
+
+class LocalPaperSection(Base, TimestampMixin):
+    """Large, page-bound parent document preserving structure and location."""
+
+    __tablename__ = "local_paper_sections"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id",
+            "page_number",
+            "section_index",
+            name="uq_local_paper_section_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paper_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_papers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_document_versions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     section_index: Mapped[int] = mapped_column(Integer, nullable=False)
     heading: Mapped[str] = mapped_column(Text, nullable=False, default="正文")
@@ -112,8 +172,15 @@ class LocalPaperSection(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     bbox_json: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
     section_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    heading_path_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    section_type: Mapped[str] = mapped_column(String(48), nullable=False, default="BODY", index=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     paper: Mapped["LocalPaper"] = relationship("LocalPaper", back_populates="sections")
+    document_version: Mapped["LocalPaperDocumentVersion | None"] = relationship(
+        "LocalPaperDocumentVersion", back_populates="sections"
+    )
     chunks: Mapped[list["LocalPaperChunk"]] = relationship(
         "LocalPaperChunk", back_populates="section", cascade="all, delete-orphan"
     )
@@ -122,8 +189,17 @@ class LocalPaperSection(Base, TimestampMixin):
 class LocalPaperChunk(Base, TimestampMixin):
     __tablename__ = "local_paper_chunks"
     __table_args__ = (
-        UniqueConstraint("paper_id", "page_number", "chunk_index", name="uq_local_paper_chunk"),
-        UniqueConstraint("paper_id", "content_sha256", name="uq_local_paper_chunk_content"),
+        UniqueConstraint(
+            "document_version_id",
+            "page_number",
+            "chunk_index",
+            name="uq_local_paper_chunk_version",
+        ),
+        UniqueConstraint(
+            "document_version_id",
+            "content_sha256",
+            name="uq_local_paper_chunk_content_version",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -131,6 +207,12 @@ class LocalPaperChunk(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("local_papers.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_document_versions.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     section_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -155,22 +237,55 @@ class LocalPaperChunk(Base, TimestampMixin):
     chunk_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lexical_terms: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lexical_tsv: Mapped[object | None] = mapped_column(TSVECTOR, nullable=True)
 
     paper: Mapped["LocalPaper"] = relationship("LocalPaper", back_populates="chunks")
+    document_version: Mapped["LocalPaperDocumentVersion | None"] = relationship(
+        "LocalPaperDocumentVersion", back_populates="chunks"
+    )
     section: Mapped["LocalPaperSection | None"] = relationship(
         "LocalPaperSection", back_populates="chunks"
     )
     figure: Mapped["LocalPaperFigure | None"] = relationship(
         "LocalPaperFigure", back_populates="chunks"
     )
+    locators: Mapped[list["LocalPaperChunkLocator"]] = relationship(
+        "LocalPaperChunkLocator", back_populates="chunk", cascade="all, delete-orphan"
+    )
 
 
-class LocalPaperFigure(Base, TimestampMixin):
-    """Figure region and OCR evidence. Pixels remain in the original PDF."""
+class LocalPaperChunkLocator(Base, TimestampMixin):
+    """Every source occurrence contributing to one semantic child chunk."""
 
-    __tablename__ = "local_paper_figures"
+    __tablename__ = "local_paper_chunk_locators"
     __table_args__ = (
-        UniqueConstraint("paper_id", "page_number", "figure_index", name="uq_local_paper_figure"),
+        UniqueConstraint("chunk_id", "page_number", "ordinal", name="uq_local_paper_chunk_locator"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_chunks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_json: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
+
+    chunk: Mapped["LocalPaperChunk"] = relationship("LocalPaperChunk", back_populates="locators")
+
+
+class LocalPaperTable(Base, TimestampMixin):
+    """Lossless table structure; Markdown is only a retrieval serialization."""
+
+    __tablename__ = "local_paper_tables"
+    __table_args__ = (
+        UniqueConstraint("document_version_id", "table_index", name="uq_local_paper_table_version"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -178,6 +293,49 @@ class LocalPaperFigure(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("local_papers.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    table_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_json: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    caption_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structure_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    html_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    markdown_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    paper: Mapped["LocalPaper"] = relationship("LocalPaper", back_populates="tables")
+
+
+class LocalPaperFigure(Base, TimestampMixin):
+    """Figure region and OCR evidence. Pixels remain in the original PDF."""
+
+    __tablename__ = "local_paper_figures"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id",
+            "page_number",
+            "figure_index",
+            name="uq_local_paper_figure_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paper_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_papers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_document_versions.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -188,12 +346,41 @@ class LocalPaperFigure(Base, TimestampMixin):
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     extractor_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    section_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_sections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    artifact_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="figure")
+    reference_texts_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     paper: Mapped["LocalPaper"] = relationship("LocalPaper", back_populates="figures")
     chunks: Mapped[list["LocalPaperChunk"]] = relationship(
         "LocalPaperChunk", back_populates="figure"
     )
 
+
+class LocalPaperRetrievalRun(Base, TimestampMixin):
+    """Durable summary of an explainable local-library retrieval request."""
+
+    __tablename__ = "local_paper_retrieval_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    library_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_libraries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    index_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    summary_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    trace_cache_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 class LocalPaperSyncRun(Base, TimestampMixin):
     __tablename__ = "local_paper_sync_runs"

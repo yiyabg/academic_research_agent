@@ -28,6 +28,22 @@ class EmbeddingResponse(BaseModel):
     vectors: list[list[float]]
 
 
+class TokenizeRequest(BaseModel):
+    """Internal-only BGE tokenizer request used by the ingestion worker.
+
+    The worker deliberately does not load a second copy of BGE-M3 just to
+    count tokens.  Keeping tokenisation next to the embedding model makes the
+    500-token child limit reproducible across API, worker and future rebuilds.
+    """
+
+    texts: list[str] = Field(min_length=1, max_length=256)
+
+
+class TokenizeResponse(BaseModel):
+    model: str
+    token_ids: list[list[int]]
+
+
 class RerankRequest(BaseModel):
     query: str = Field(min_length=1)
     documents: list[str] = Field(min_length=1, max_length=100)
@@ -92,6 +108,16 @@ class LocalBGEEmbeddingRuntime:
         )
         return [[float(value) for value in vector] for vector in raw]
 
+    def tokenize(self, texts: Sequence[str]) -> list[list[int]]:
+        tokenizer = self.model.tokenizer
+        encoded = tokenizer(
+            list(texts),
+            add_special_tokens=False,
+            truncation=False,
+            padding=False,
+        )
+        return [[int(token) for token in ids] for ids in encoded["input_ids"]]
+
 
 class LocalBGERerankerRuntime:
     def __init__(self) -> None:
@@ -148,6 +174,15 @@ async def embed(request: EmbeddingRequest) -> EmbeddingResponse:
         dimension=settings.LOCAL_PAPER_EMBEDDING_DIM,
         vectors=vectors,
     )
+
+
+@embedding_app.post("/tokenize", response_model=TokenizeResponse)
+async def tokenize(request: TokenizeRequest) -> TokenizeResponse:
+    try:
+        token_ids = await asyncio.to_thread(embedding_runtime.tokenize, request.texts)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return TokenizeResponse(model=settings.LOCAL_PAPER_EMBEDDING_MODEL, token_ids=token_ids)
 
 
 @reranker_app.get("/healthz")

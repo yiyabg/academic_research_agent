@@ -9,6 +9,7 @@ import html as html_module
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 from collections import Counter
@@ -20,10 +21,10 @@ from pathlib import Path
 from uuid import UUID
 
 import fitz
+import httpx
 import redis.asyncio as aioredis
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from rank_bm25 import BM25Okapi
 from sqlalchemy import Text, cast, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,12 +33,16 @@ from app.core.exceptions import AuthorizationError, NotFoundError, ValidationErr
 from app.db.models.local_paper_library import (
     LocalPaper,
     LocalPaperChunk,
+    LocalPaperChunkLocator,
+    LocalPaperDocumentVersion,
     LocalPaperFigure,
     LocalPaperLibrary,
     LocalPaperQuarantineItem,
+    LocalPaperRetrievalRun,
     LocalPaperSection,
     LocalPaperSyncEvent,
     LocalPaperSyncRun,
+    LocalPaperTable,
 )
 from app.schemas.literature_research.local_library import (
     LocalLibraryQuarantineRead,
@@ -359,6 +364,14 @@ class SourceFigure:
 
 
 @dataclass(frozen=True)
+class SourceTable:
+    page_number: int
+    table_index: int
+    bbox: list[float] | None
+    markdown_text: str
+
+
+@dataclass(frozen=True)
 class SourceSection:
     page_number: int
     section_index: int
@@ -373,6 +386,8 @@ class SourceSection:
 class StructuredSource:
     sections: tuple[SourceSection, ...]
     figures: tuple[SourceFigure, ...]
+    tables: tuple[SourceTable, ...] = ()
+    parser_name: str = "pymupdf"
 
     @property
     def pages(self) -> list[tuple[int, str]]:
@@ -388,6 +403,295 @@ class StructuredSource:
                 content = f"{section.heading}\n{content}"
             by_page.setdefault(section.page_number, []).append(content)
         return [(page, "\n\n".join(parts)) for page, parts in sorted(by_page.items())]
+
+
+class DoclingPrimaryParseError(RuntimeError):
+    """The v7 PDF parser is unavailable or did not produce structure."""
+
+
+@dataclass(frozen=True)
+class V7ParentSection:
+    """A logical parent section built before it is written to PostgreSQL."""
+
+    page_number: int
+    page_end: int
+    section_index: int
+    heading: str
+    heading_level: int
+    heading_path: tuple[str, ...]
+    section_type: str
+    content: str
+    paragraphs: tuple[SourceParagraph, ...]
+    bbox: list[float] | None
+    token_count: int
+
+
+@dataclass(frozen=True)
+class V7ChildChunk:
+    """A BGE-token bounded, semantically coherent retrieval child."""
+
+    page_number: int
+    paragraph_index: int
+    text: str
+    bbox: list[float] | None
+    kind: str
+    figure_index: int | None
+    token_count: int
+    locators: tuple[SourceParagraph, ...]
+
+
+def _section_type(heading: str) -> str:
+    compact = _normalise_text(heading).casefold()
+    rules = (
+        ("ABSTRACT", r"\babstract\b|摘要"),
+        ("INTRODUCTION", r"\bintroduction\b|引言|绪论"),
+        ("METHODS", r"\bmethod(?:ology|s)?\b|\bapproach\b|方法"),
+        ("ABLATION", r"\bablation\b|消融"),
+        ("EXPERIMENTS", r"\bexperiment(?:s|al)?\b|\bevaluation\b|实验|评估"),
+        ("RESULTS", r"\bresults?\b|结果"),
+        ("DISCUSSION", r"\bdiscussion\b|讨论"),
+        ("CONCLUSION", r"\bconclusion(?:s)?\b|结论"),
+        ("REFERENCES", r"\breferences?\b|\bbibliography\b|参考文献"),
+    )
+    for name, pattern in rules:
+        if re.search(pattern, compact, re.I):
+            return name
+    return "BODY"
+
+
+class BGETokenizerHTTPClient:
+    """Use the same BGE-M3 tokenizer as the embedding container.
+
+    This is intentionally an internal Docker request, not an OpenAI call and
+    not a second transformer process in each Celery worker.
+    """
+
+    def __init__(self, service_url: str | None = None) -> None:
+        self.service_url = (service_url or settings.LOCAL_PAPER_EMBEDDING_SERVICE_URL).rstrip("/")
+
+    async def token_counts(self, texts: list[str]) -> list[int]:
+        counts: list[int] = []
+        for start in range(0, len(texts), 256):
+            batch = texts[start : start + 256]
+            async with httpx.AsyncClient(
+                timeout=settings.LOCAL_PAPER_MODEL_HTTP_TIMEOUT_SECONDS
+            ) as client:
+                response = await client.post(f"{self.service_url}/tokenize", json={"texts": batch})
+            response.raise_for_status()
+            token_ids = response.json().get("token_ids")
+            if not isinstance(token_ids, list) or len(token_ids) != len(batch):
+                raise RuntimeError("BGE tokenizer returned a count that does not match its input")
+            counts.extend(len(ids) if isinstance(ids, list) else 0 for ids in token_ids)
+        return counts
+
+
+class V7StructureChunker:
+    """Build clean logical parents and <=500-token children from source blocks."""
+
+    def __init__(self, tokenizer: BGETokenizerHTTPClient | None = None) -> None:
+        self.tokenizer = tokenizer or BGETokenizerHTTPClient()
+
+    async def build(self, source: StructuredSource) -> list[V7ParentSection]:
+        paragraphs = [
+            paragraph
+            for section in source.sections
+            for paragraph in section.paragraphs
+            if _normalise_text(paragraph.text)
+            and paragraph.kind != "figure_ocr"  # v7 never indexes OCR over a figure.
+        ]
+        counts = await self.tokenizer.token_counts([paragraph.text for paragraph in paragraphs])
+        token_count_by_id = {id(paragraph): count for paragraph, count in zip(paragraphs, counts, strict=True)}
+
+        parents: list[V7ParentSection] = []
+        active: list[SourceParagraph] = []
+        active_count = 0
+        active_heading = "正文"
+        active_level = 0
+        active_type = "BODY"
+
+        def flush() -> None:
+            nonlocal active, active_count
+            if not active:
+                return
+            start_page, end_page = active[0].page_number, active[-1].page_number
+            parents.append(
+                V7ParentSection(
+                    page_number=start_page,
+                    page_end=end_page,
+                    section_index=len(parents),
+                    heading=active_heading,
+                    heading_level=active_level,
+                    heading_path=(active_heading,),
+                    section_type=active_type,
+                    content="\n\n".join(_normalise_text(item.text) for item in active),
+                    paragraphs=tuple(active),
+                    bbox=_union_bbox(active) if start_page == end_page else None,
+                    token_count=active_count,
+                )
+            )
+            active, active_count = [], 0
+
+        for source_section in source.sections:
+            heading = _normalise_text(source_section.heading) or "正文"
+            section_type = _section_type(heading)
+            # A changed heading always starts a new logical parent.  A repeated
+            # heading on the next page stays together up to the explicit parent
+            # budget, preserving a usable context for child-hit generation.
+            if active and heading != active_heading:
+                flush()
+            if not active:
+                active_heading, active_level, active_type = (
+                    heading,
+                    source_section.heading_level,
+                    section_type,
+                )
+            for paragraph in source_section.paragraphs:
+                if paragraph.kind == "figure_ocr" or not _normalise_text(paragraph.text):
+                    continue
+                count = token_count_by_id.get(id(paragraph), 0)
+                if active and active_count + count > settings.LOCAL_PAPER_PARENT_MAX_TOKENS:
+                    flush()
+                    active_heading, active_level, active_type = (
+                        heading,
+                        source_section.heading_level,
+                        section_type,
+                    )
+                active.append(paragraph)
+                active_count += count
+        flush()
+        return parents
+
+    async def children(self, parent: V7ParentSection) -> list[V7ChildChunk]:
+        """Pack adjacent prose blocks; retain table/caption nodes separately."""
+        result: list[V7ChildChunk] = []
+        pending: list[SourceParagraph] = []
+        pending_count = 0
+
+        async def append_pending() -> None:
+            nonlocal pending, pending_count
+            if not pending:
+                return
+            result.append(
+                V7ChildChunk(
+                    page_number=pending[0].page_number,
+                    paragraph_index=pending[0].paragraph_index,
+                    text="\n\n".join(_normalise_text(item.text) for item in pending),
+                    bbox=_union_bbox(pending) if len({item.page_number for item in pending}) == 1 else None,
+                    kind="text",
+                    figure_index=None,
+                    token_count=pending_count,
+                    locators=tuple(pending),
+                )
+            )
+            pending, pending_count = [], 0
+
+        counts = await self.tokenizer.token_counts([item.text for item in parent.paragraphs])
+        for paragraph, count in zip(parent.paragraphs, counts, strict=True):
+            text = _normalise_text(paragraph.text)
+            if not text or paragraph.kind == "figure_ocr":
+                continue
+            # Tables and figure captions have a distinct evidence type and are
+            # never mixed into prose. They remain recallable only for a visual
+            # request (the substantive filter enforces that policy).
+            if paragraph.kind in {"table", "figure_caption"}:
+                await append_pending()
+                result.append(
+                    V7ChildChunk(
+                        page_number=paragraph.page_number,
+                        paragraph_index=paragraph.paragraph_index,
+                        text=text,
+                        bbox=paragraph.bbox,
+                        kind=paragraph.kind,
+                        figure_index=paragraph.figure_index,
+                        token_count=count,
+                        locators=(paragraph,),
+                    )
+                )
+                continue
+            if count > settings.LOCAL_PAPER_CHUNK_SIZE:
+                await append_pending()
+                result.extend(await self._split_oversized(paragraph))
+                continue
+            if pending and pending_count + count > settings.LOCAL_PAPER_CHUNK_SIZE:
+                await append_pending()
+            pending.append(paragraph)
+            pending_count += count
+        await append_pending()
+        return result
+
+    async def _split_oversized(self, paragraph: SourceParagraph) -> list[V7ChildChunk]:
+        """Split only an oversized prose block at sentence boundaries.
+
+        The 64-token overlap is used only here, as agreed for v7. Normal
+        adjacent paragraphs remain non-overlapping to avoid duplicate evidence.
+        """
+        sentences = [
+            segment.strip()
+            for segment in re.split(r"(?<=[.!?。！？；;])\s+", _normalise_text(paragraph.text))
+            if segment.strip()
+        ] or [_normalise_text(paragraph.text)]
+        counts = await self.tokenizer.token_counts(sentences)
+        output: list[V7ChildChunk] = []
+        current: list[str] = []
+        current_count = 0
+        for sentence, count in zip(sentences, counts, strict=True):
+            # A pathological no-space sequence is split conservatively by
+            # characters, then token-verified before writing a child.
+            pieces = [sentence]
+            if count > settings.LOCAL_PAPER_CHUNK_SIZE:
+                pieces = await self._bisect_to_token_limit(sentence)
+            for piece in pieces:
+                piece_count = (await self.tokenizer.token_counts([piece]))[0]
+                if current and current_count + piece_count > settings.LOCAL_PAPER_CHUNK_SIZE:
+                    output.append(self._oversized_child(paragraph, current, current_count))
+                    overlap = await self._tail_overlap(current)
+                    current = overlap
+                    current_count = sum(await self.tokenizer.token_counts(current)) if current else 0
+                current.append(piece)
+                current_count += piece_count
+        if current:
+            output.append(self._oversized_child(paragraph, current, current_count))
+        return output
+
+    async def _bisect_to_token_limit(self, text: str) -> list[str]:
+        if (await self.tokenizer.token_counts([text]))[0] <= settings.LOCAL_PAPER_CHUNK_SIZE:
+            return [text]
+        midpoint = max(1, len(text) // 2)
+        boundary = text.rfind(" ", max(1, midpoint - 200), midpoint + 200)
+        if boundary <= 0:
+            boundary = midpoint
+        return [
+            *(await self._bisect_to_token_limit(text[:boundary].strip())),
+            *(await self._bisect_to_token_limit(text[boundary:].strip())),
+        ]
+
+    async def _tail_overlap(self, pieces: list[str]) -> list[str]:
+        # Sentences are kept whole. The BGE-count validation in the caller
+        # ensures this overlap never exceeds the configured 64-token budget.
+        if not settings.LOCAL_PAPER_CHUNK_OVERLAP or not pieces:
+            return []
+        tail = pieces[-1]
+        return (
+            [tail]
+            if (await self.tokenizer.token_counts([tail]))[0]
+            <= settings.LOCAL_PAPER_CHUNK_OVERLAP
+            else []
+        )
+
+    @staticmethod
+    def _oversized_child(
+        paragraph: SourceParagraph, parts: list[str], token_count: int
+    ) -> V7ChildChunk:
+        return V7ChildChunk(
+            page_number=paragraph.page_number,
+            paragraph_index=paragraph.paragraph_index,
+            text=" ".join(parts),
+            bbox=paragraph.bbox,
+            kind="text",
+            figure_index=paragraph.figure_index,
+            token_count=token_count,
+            locators=(paragraph,),
+        )
 
 
 def _bbox(value: object) -> list[float] | None:
@@ -609,7 +913,120 @@ def _ocr_figure(page: fitz.Page, bbox: list[float]) -> tuple[str | None, str | N
         return None, None
 
 
-def extract_structured_source(path: Path) -> StructuredSource:
+def _docling_bbox(value: object) -> list[float] | None:
+    """Read Docling provenance without pinning to a minor-version model type."""
+    for names in (("l", "t", "r", "b"), ("left", "top", "right", "bottom")):
+        try:
+            return [round(float(getattr(value, name)), 2) for name in names]
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return _bbox(value)
+
+
+def _docling_structured_source(path: Path) -> StructuredSource | None:
+    """Primary v7 structure extraction, with PyMuPDF retained for locators.
+
+    Docling's public item/provenance model has evolved across 2.x releases.
+    This small adapter intentionally uses stable attributes only and returns
+    ``None`` only for a malformed conversion. The caller decides whether that
+    is acceptable; production v7 PDFs require this parser.
+    """
+    if path.suffix.lower() != ".pdf":
+        return None
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        pipeline_options = PdfPipelineOptions()
+        # OCR is only a narrowly-scoped PyMuPDF fallback for scanned pages.
+        # Enabling Docling OCR here would reintroduce figure/table OCR into
+        # every sync and make a text PDF needlessly expensive.
+        pipeline_options.do_ocr = False
+        pipeline_options.do_table_structure = True
+        # Runtime is offline. Supply the immutable artifact directory
+        # explicitly so Docling cannot silently use a transient HF cache.
+        artifacts_path = os.environ.get("DOCLING_SERVE_ARTIFACTS_PATH", "").strip()
+        if artifacts_path and hasattr(pipeline_options, "artifacts_path"):
+            pipeline_options.artifacts_path = Path(artifacts_path)
+        converter = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+        document = converter.convert(str(path)).document
+        iterator = getattr(document, "iterate_items", None)
+        if not callable(iterator):
+            return None
+        sections: list[SourceSection] = []
+        tables: list[SourceTable] = []
+        active: list[SourceParagraph] = []
+        heading, heading_level, section_index = "正文", 0, 0
+
+        def flush() -> None:
+            nonlocal active, section_index
+            if not active:
+                return
+            sections.append(
+                SourceSection(
+                    page_number=active[0].page_number,
+                    section_index=section_index,
+                    heading=heading,
+                    heading_level=heading_level,
+                    content="\n\n".join(item.text for item in active),
+                    bbox=_union_bbox(active)
+                    if len({item.page_number for item in active}) == 1
+                    else None,
+                    paragraphs=tuple(active),
+                )
+            )
+            section_index += 1
+            active = []
+
+        for item, level in iterator():
+            text = _normalise_text(str(getattr(item, "text", "") or ""))
+            label = str(getattr(item, "label", "") or item.__class__.__name__).casefold()
+            provenance = list(getattr(item, "prov", []) or [])
+            first_prov = provenance[0] if provenance else None
+            page_number = int(getattr(first_prov, "page_no", 1) or 1)
+            bbox = _docling_bbox(getattr(first_prov, "bbox", None)) if first_prov else None
+            if "section" in label and "header" in label and text:
+                flush()
+                heading = text
+                heading_level = int(level or 1)
+                continue
+            if "table" in label:
+                markdown = ""
+                exporter = getattr(item, "export_to_markdown", None)
+                if callable(exporter):
+                    try:
+                        markdown = _normalise_text(str(exporter(document=document)))
+                    except Exception:
+                        markdown = ""
+                markdown = markdown or text
+                if markdown:
+                    tables.append(SourceTable(page_number, len(tables), bbox, markdown))
+                    active.append(
+                        SourceParagraph(
+                            page_number,
+                            len(active),
+                            markdown,
+                            bbox,
+                            kind="table",
+                        )
+                    )
+                continue
+            # Pictures have no text child in v7. Their pixels/caption are
+            # retained by the PyMuPDF locator extraction, then interpreted
+            # only inside a deep-research run.
+            if text and "picture" not in label and "figure" not in label:
+                active.append(SourceParagraph(page_number, len(active), text, bbox))
+        flush()
+        return StructuredSource(tuple(sections), (), tuple(tables), parser_name="docling") if sections else None
+    except Exception as exc:
+        logger.warning("Docling conversion failed for %s: %s", path.name, exc)
+        return None
+
+
+def _extract_pymupdf_structured_source(path: Path) -> StructuredSource:
     """Extract parent sections, child paragraphs, tables, figures and locations."""
     kind = SUPPORTED_SUFFIXES[path.suffix.lower()]
     if kind == "html":
@@ -621,12 +1038,13 @@ def extract_structured_source(path: Path) -> StructuredSource:
             for index, text in enumerate(re.split(r"\n\s*\n", parser.text()))
             if _normalise_text(text)
         ]
-        return StructuredSource(tuple(_sections_from_paragraphs(paragraphs)), ())
+        return StructuredSource(tuple(_sections_from_paragraphs(paragraphs)), (), parser_name="html")
 
     document = fitz.open(path)
     try:
         paragraphs: list[SourceParagraph] = []
         figures: list[SourceFigure] = []
+        tables: list[SourceTable] = []
         for page in document:
             page_number = page.number + 1
             page_paragraphs: list[SourceParagraph] = []
@@ -699,15 +1117,19 @@ def extract_structured_source(path: Path) -> StructuredSource:
                 except Exception:
                     pass
             try:
-                for table in page.find_tables().tables:
+                for table_index, table in enumerate(page.find_tables().tables):
                     markdown = _table_markdown(table)
                     if markdown:
+                        table_bbox = _bbox(table.bbox)
+                        tables.append(
+                            SourceTable(page_number, len(tables), table_bbox, markdown)
+                        )
                         page_paragraphs.append(
                             SourceParagraph(
                                 page_number,
                                 len(page_paragraphs),
                                 markdown,
-                                _bbox(table.bbox),
+                                table_bbox,
                                 kind="table",
                             )
                         )
@@ -792,9 +1214,39 @@ def extract_structured_source(path: Path) -> StructuredSource:
                 if len(referenced) == 1:
                     page_paragraphs[position] = replace(item, figure_index=referenced.pop())
             paragraphs.extend(page_paragraphs)
-        return StructuredSource(tuple(_sections_from_paragraphs(paragraphs)), tuple(figures))
+        return StructuredSource(
+            tuple(_sections_from_paragraphs(paragraphs)), tuple(figures), tuple(tables), "pymupdf"
+        )
     finally:
         document.close()
+
+
+def extract_structured_source(path: Path) -> StructuredSource:
+    """Docling PDF structure plus PyMuPDF page-accurate locators.
+
+    A missing Docling model is a deployment error, not a reason to quietly
+    create a structurally different v7 index. Static HTML remains local and
+    intentionally does not depend on Docling.
+    """
+    if path.suffix.lower() != ".pdf":
+        return _extract_pymupdf_structured_source(path)
+    docling = _docling_structured_source(path)
+    if docling is None:
+        if settings.LOCAL_PAPER_REQUIRE_DOCLING:
+            raise DoclingPrimaryParseError(
+                "Docling did not produce structured PDF content. Verify model-init "
+                "and DOCLING_SERVE_ARTIFACTS_PATH before synchronizing."
+            )
+        return _extract_pymupdf_structured_source(path)
+    # PyMuPDF does not decide textual structure. It supplies source bboxes,
+    # page-local figure artifacts and locator fallback only.
+    fallback = _extract_pymupdf_structured_source(path)
+    return StructuredSource(
+        sections=docling.sections,
+        figures=fallback.figures,
+        tables=docling.tables or fallback.tables,
+        parser_name="docling+pymupdf-locators",
+    )
 
 
 def extract_source(path: Path) -> list[tuple[int, str]]:
@@ -878,6 +1330,7 @@ class RetrievalChunk:
     bm25_score: float | None = None
     rrf_score: float = 0.0
     rerank_score: float | None = None
+    mmr_score: float | None = None
     vector: list[float] | None = None
 
     @property
@@ -960,6 +1413,7 @@ def _select_diverse_papers(
             return lambda_mult * relevance - (1.0 - lambda_mult) * diversity
 
         best = max(remaining, key=score)
+        best.mmr_score = score(best)
         selected.append(best)
         remaining.remove(best)
     return selected
@@ -1004,7 +1458,7 @@ def _is_substantive_retrieval_chunk(item: RetrievalChunk, *, query: str) -> bool
     minimum = settings.LOCAL_PAPER_MIN_SUBSTANTIVE_CHARS
     if len(text) >= minimum:
         return True
-    if item.chunk.chunk_kind in {"figure_ocr", "table"}:
+    if item.chunk.chunk_kind in {"figure_ocr", "figure_caption"}:
         return _is_visual_query(query)
     return len(_normalise_text(item.parent.content)) < minimum
 
@@ -1335,6 +1789,38 @@ class LocalPaperLibraryService:
             existing = (
                 await self.db.scalars(select(LocalPaper).where(LocalPaper.library_id == library.id))
             ).all()
+            # Repair the historical state left by pre-v7 failed rebuilds.  A
+            # paper is safe to recover only when the read-only source still
+            # hashes to the catalogued revision *and* its active immutable
+            # document version is READY.  This is deliberately a reconciliation
+            # status change, not a re-parse/re-embed operation.
+            active_ready_versions = set(
+                (
+                    await self.db.scalars(
+                        select(LocalPaperDocumentVersion.id).where(
+                            LocalPaperDocumentVersion.id.in_(
+                                [
+                                    paper.active_document_version_id
+                                    for paper in existing
+                                    if paper.active_document_version_id is not None
+                                ]
+                            ),
+                            LocalPaperDocumentVersion.status == "READY",
+                            LocalPaperDocumentVersion.is_active.is_(True),
+                        )
+                    )
+                ).all()
+            )
+            for paper in existing:
+                source = supported.get(paper.relative_source_path)
+                if (
+                    paper.status == "MISSING"
+                    and source is not None
+                    and paper.active_document_version_id in active_ready_versions
+                    and _sha256(source) == paper.source_sha256
+                ):
+                    paper.status = "INDEXED"
+                    summary["recovered"] += 1
             by_citekey = {paper.citekey: paper for paper in existing}
             by_hash = {paper.source_sha256: paper for paper in existing}
             by_doi = {paper.doi: paper for paper in existing if paper.doi}
@@ -1487,11 +1973,15 @@ class LocalPaperLibraryService:
                     if paper and paper.source_sha256 == digest:
                         # A source hash alone is insufficient: parser/chunker/
                         # embedding format changes must force a real re-index.
-                        needs_reindex = paper.ingestion_version != _local_index_version() or (
-                            paper.abstract_text is None
-                            and paper.introduction_text is None
-                            and paper.conclusion_text is None
-                        )
+                        # The active document version is immutable.  Missing
+                        # convenience extracts are not a valid reason to feed
+                        # the exact same source/parser/chunker tuple through
+                        # the builder again: it would try to insert the same
+                        # (document_version, page, section_index) rows and
+                        # poison a later reconciliation as "MISSING".  A
+                        # parser/chunker improvement must deliberately bump
+                        # the ingestion version, which creates a new version.
+                        needs_reindex = paper.ingestion_version != _local_index_version()
                         if not needs_reindex:
                             paper.status = "INDEXED"
                             paper.relative_source_path = relative
@@ -1521,6 +2011,17 @@ class LocalPaperLibraryService:
                         summary["empty_text"] += 1
                         continue
                     sections = extract_structured_sections(pages)
+                    # Build the entire v7 candidate before touching the active
+                    # document version. A parser/tokenizer error therefore
+                    # leaves the previously searchable paper intact.
+                    v7_chunker = V7StructureChunker()
+                    parent_sources = await v7_chunker.build(structured_source)
+                    if not parent_sources:
+                        raise RuntimeError("No v7 logical parent sections were produced")
+                    child_sources = [
+                        (parent_source, await v7_chunker.children(parent_source))
+                        for parent_source in parent_sources
+                    ]
                     if paper is None:
                         paper = LocalPaper(
                             library_id=library.id,
@@ -1545,21 +2046,9 @@ class LocalPaperLibraryService:
                         self.db.add(paper)
                         await self.db.flush()
                     else:
-                        await self.db.execute(
-                            delete(LocalPaperChunk).where(LocalPaperChunk.paper_id == paper.id)
-                        )
-                        await self.db.execute(
-                            delete(LocalPaperSection).where(LocalPaperSection.paper_id == paper.id)
-                        )
-                        await self.db.execute(
-                            delete(LocalPaperFigure).where(LocalPaperFigure.paper_id == paper.id)
-                        )
-                        # ``content_sha256`` is unique per paper.  Flush the
-                        # old v3 children *before* staging v4 sections and
-                        # children, otherwise PostgreSQL may check a new
-                        # duplicate-page header against an undeleted old row
-                        # in the same rebuild transaction.
-                        await self.db.flush()
+                        # Do not delete the active children here. v7 builds an
+                        # immutable candidate version and switches the pointer
+                        # only after its DB rows and Qdrant points both exist.
                         paper.doi, paper.title = doi, entry.fields.get("title", entry.citekey)
                         paper.authors_json, paper.publication_year = (
                             _authors(entry.fields.get("author", "")),
@@ -1577,12 +2066,59 @@ class LocalPaperLibraryService:
                         paper.abstract_text = sections["abstract_text"]
                         paper.introduction_text = sections["introduction_text"]
                         paper.conclusion_text = sections["conclusion_text"]
+                    version = await self.db.scalar(
+                        select(LocalPaperDocumentVersion).where(
+                            LocalPaperDocumentVersion.paper_id == paper.id,
+                            LocalPaperDocumentVersion.source_sha256 == digest,
+                            LocalPaperDocumentVersion.parser_version
+                            == settings.LOCAL_PAPER_INGESTION_VERSION,
+                            LocalPaperDocumentVersion.chunker_version
+                            == f"bge-token-{settings.LOCAL_PAPER_CHUNK_SIZE}-parent-{settings.LOCAL_PAPER_PARENT_MAX_TOKENS}",
+                        )
+                    )
+                    if version is None:
+                        version = LocalPaperDocumentVersion(
+                            paper_id=paper.id,
+                            source_sha256=digest,
+                            parser_version=settings.LOCAL_PAPER_INGESTION_VERSION,
+                            chunker_version=f"bge-token-{settings.LOCAL_PAPER_CHUNK_SIZE}-parent-{settings.LOCAL_PAPER_PARENT_MAX_TOKENS}",
+                            embedding_model=settings.LOCAL_PAPER_EMBEDDING_MODEL,
+                            status="BUILDING",
+                            page_count=len(pages),
+                            text_characters=sum(len(text) for _, text in pages),
+                            quality_json={
+                                "structure_parser": structured_source.parser_name,
+                                "figure_ocr_indexed": False,
+                                "chunk_token_limit": settings.LOCAL_PAPER_CHUNK_SIZE,
+                            },
+                        )
+                        self.db.add(version)
+                        await self.db.flush()
+                    elif not version.is_active:
+                        await self.db.execute(
+                            delete(LocalPaperSection).where(
+                                LocalPaperSection.document_version_id == version.id
+                            )
+                        )
+                        await self.db.execute(
+                            delete(LocalPaperFigure).where(
+                                LocalPaperFigure.document_version_id == version.id
+                            )
+                        )
+                        await self.db.execute(
+                            delete(LocalPaperTable).where(
+                                LocalPaperTable.document_version_id == version.id
+                            )
+                        )
+                        await self.db.flush()
+
                     section_rows: list[LocalPaperSection] = []
-                    for section in structured_source.sections:
+                    for section in parent_sources:
                         section_content = _normalise_text(section.content)
                         section_rows.append(
                             LocalPaperSection(
                                 paper_id=paper.id,
+                                document_version_id=version.id,
                                 page_number=section.page_number,
                                 section_index=section.section_index,
                                 heading=_normalise_text(section.heading) or "正文",
@@ -1592,82 +2128,132 @@ class LocalPaperLibraryService:
                                 section_sha256=hashlib.sha256(
                                     section_content.encode("utf-8")
                                 ).hexdigest(),
+                                heading_path_json=list(section.heading_path),
+                                section_type=section.section_type,
+                                page_end=section.page_end,
+                                token_count=section.token_count,
                             )
                         )
                     self.db.add_all(section_rows)
+                    await self.db.flush()
+                    def parent_for_page(page_number: int) -> LocalPaperSection | None:
+                        return next(
+                            (
+                                row
+                                for row in section_rows
+                                if row.page_number <= page_number <= (row.page_end or row.page_number)
+                            ),
+                            None,
+                        )
+
                     figure_rows = [
                         LocalPaperFigure(
                             paper_id=paper.id,
+                            document_version_id=version.id,
+                            section_id=(parent_for_page(figure.page_number).id if parent_for_page(figure.page_number) else None),
                             page_number=figure.page_number,
                             figure_index=figure.figure_index,
                             figure_label=figure.figure_label,
                             bbox_json=figure.bbox,
-                            caption_text=(
-                                _normalise_text(figure.caption_text)
-                                if figure.caption_text
-                                else None
-                            ),
-                            ocr_text=_normalise_text(figure.ocr_text) if figure.ocr_text else None,
+                            caption_text=_normalise_text(figure.caption_text) if figure.caption_text else None,
+                            # Figure OCR is deliberately not corpus evidence in v7.
+                            ocr_text=None,
                             image_sha256=figure.image_sha256,
                             extractor_version=_local_index_version(),
+                            artifact_kind="figure",
                         )
                         for figure in structured_source.figures
                     ]
-                    self.db.add_all(figure_rows)
+                    table_rows = [
+                        LocalPaperTable(
+                            paper_id=paper.id,
+                            document_version_id=version.id,
+                            table_index=table.table_index,
+                            page_number=table.page_number,
+                            bbox_json=table.bbox,
+                            structure_json={"format": "markdown", "source": "pymupdf"},
+                            markdown_text=table.markdown_text,
+                        )
+                        for table in structured_source.tables
+                    ]
+                    self.db.add_all([*figure_rows, *table_rows])
                     await self.db.flush()
                     figure_ids = {
                         (figure.page_number, figure.figure_index): row.id
                         for figure, row in zip(structured_source.figures, figure_rows, strict=True)
                     }
                     chunk_rows: list[LocalPaperChunk] = []
+                    chunk_source_pairs: list[tuple[LocalPaperChunk, V7ChildChunk]] = []
                     per_page_index: Counter[int] = Counter()
                     seen_child_hashes: set[str] = set()
-                    for section_source, section_row in zip(
-                        structured_source.sections, section_rows, strict=True
+                    for (parent_source, children), section_row in zip(
+                        child_sources, section_rows, strict=True
                     ):
-                        for paragraph in section_source.paragraphs:
-                            # The associated figure child below is the single
-                            # indexable visual evidence.  Indexing both its
-                            # caption block and OCR/caption child creates a
-                            # duplicate vector for every figure.
-                            if paragraph.kind == "figure_caption":
+                        for child in children:
+                            child_text = _normalise_text(child.text)
+                            if not child_text:
                                 continue
-                            for child in _split_paragraph(paragraph):
-                                child_text = _normalise_text(child.text)
-                                if not child_text:
-                                    continue
-                                child_hash = hashlib.sha256(child_text.encode("utf-8")).hexdigest()
-                                # Repeated running headers, repeated page
-                                # titles and duplicated figure OCR are one
-                                # textual fact within a paper, not separate
-                                # retrieval candidates.
-                                if child_hash in seen_child_hashes:
-                                    continue
-                                seen_child_hashes.add(child_hash)
-                                chunk_index = per_page_index[child.page_number]
-                                per_page_index[child.page_number] += 1
-                                chunk_rows.append(
-                                    LocalPaperChunk(
-                                        paper_id=paper.id,
-                                        section_id=section_row.id,
-                                        figure_id=figure_ids.get(
-                                            (child.page_number, child.figure_index)
-                                        ),
-                                        page_number=child.page_number,
-                                        chunk_index=chunk_index,
-                                        paragraph_index=child.paragraph_index,
-                                        heading=_normalise_text(section_source.heading) or "正文",
-                                        bbox_json=child.bbox,
-                                        chunk_kind=child.kind,
-                                        content=child_text,
-                                        content_sha256=child_hash,
+                            child_hash = hashlib.sha256(child_text.encode("utf-8")).hexdigest()
+                            # Repeated running headers and duplicated text are
+                            # one fact per paper. Locations are retained on the
+                            # one canonical child instead of duplicate vectors.
+                            if child_hash in seen_child_hashes:
+                                continue
+                            seen_child_hashes.add(child_hash)
+                            chunk_index = per_page_index[child.page_number]
+                            per_page_index[child.page_number] += 1
+                            row = LocalPaperChunk(
+                                paper_id=paper.id,
+                                document_version_id=version.id,
+                                section_id=section_row.id,
+                                figure_id=figure_ids.get((child.page_number, child.figure_index)),
+                                page_number=child.page_number,
+                                chunk_index=chunk_index,
+                                paragraph_index=child.paragraph_index,
+                                heading=_normalise_text(parent_source.heading) or "正文",
+                                bbox_json=child.bbox,
+                                chunk_kind=child.kind,
+                                content=child_text,
+                                content_sha256=child_hash,
+                                token_count=child.token_count,
+                                embedding_text=(
+                                    f"标题：{paper.title}\n章节：{section_row.heading}\n{child_text}"
+                                ),
+                                lexical_terms=" ".join(
+                                    _bm25_tokens(
+                                        f"{paper.title} {paper.doi or ''} {section_row.heading} {child_text}"
                                     )
                                 )
+                            )
+                            chunk_rows.append(row)
+                            chunk_source_pairs.append((row, child))
                     self.db.add_all(chunk_rows)
                     await self.db.flush()
-                    await self.index.replace_paper_chunks(
+                    self.db.add_all(
+                        LocalPaperChunkLocator(
+                            chunk_id=chunk.id,
+                            page_number=locator.page_number,
+                            bbox_json=locator.bbox,
+                            ordinal=ordinal,
+                            source_kind=locator.kind,
+                        )
+                        for chunk, child in chunk_source_pairs
+                        for ordinal, locator in enumerate(child.locators)
+                    )
+                    await self.db.execute(
+                        LocalPaperChunk.__table__.update()
+                        .where(LocalPaperChunk.document_version_id == version.id)
+                        .values(
+                            lexical_tsv=func.to_tsvector(
+                                "simple", LocalPaperChunk.lexical_terms
+                            )
+                        )
+                    )
+                    await self.db.flush()
+                    await self.index.activate_document_version_chunks(
                         collection=library.qdrant_collection,
                         paper_id=paper.id,
+                        document_version_id=version.id,
                         chunks=[
                             LocalPaperVectorChunk(
                                 chunk_id=chunk.id,
@@ -1678,12 +2264,25 @@ class LocalPaperLibraryService:
                                 paragraph_index=chunk.paragraph_index,
                                 heading=chunk.heading,
                                 content=chunk.content,
+                                document_version_id=version.id,
                                 figure_id=chunk.figure_id,
+                                node_type=chunk.chunk_kind,
+                                embedding_text=chunk.embedding_text,
                             )
                             for chunk in chunk_rows
                             if chunk.section_id is not None
                         ],
                     )
+                    await self.db.execute(
+                        LocalPaperDocumentVersion.__table__.update()
+                        .where(
+                            LocalPaperDocumentVersion.paper_id == paper.id,
+                            LocalPaperDocumentVersion.id != version.id,
+                        )
+                        .values(is_active=False)
+                    )
+                    version.status, version.is_active = "READY", True
+                    paper.active_document_version_id = version.id
                     await self.db.commit()
                     seen_ids.add(paper.id)
                     by_hash[digest] = paper
@@ -1705,6 +2304,17 @@ class LocalPaperLibraryService:
                     by_citekey = {item.citekey: item for item in existing}
                     by_hash = {item.source_sha256: item for item in existing}
                     by_doi = {item.doi: item for item in existing if item.doi}
+                    # A failed *rebuild* must never make an already active,
+                    # searchable version disappear during reconciliation.
+                    # Keep the existing document as the serving version and
+                    # record the failed attempt in quarantine for operators.
+                    preserved = by_citekey.get(entry.citekey) or by_hash.get(digest)
+                    if (
+                        preserved is not None
+                        and preserved.active_document_version_id is not None
+                        and preserved.status == "INDEXED"
+                    ):
+                        seen_ids.add(preserved.id)
                     await self._quarantine(
                         run,
                         library,
@@ -1853,53 +2463,47 @@ class LocalPaperLibraryService:
         allowed = {paper.id: paper for paper in candidates}
         evidence: dict[UUID, list[LocalPaperEvidenceRead]] = {}
         mode = "metadata"
+        rerank_candidates: list[RetrievalChunk] = []
+        eligible_candidates: list[RetrievalChunk] = []
+        retrieval_run: LocalPaperRetrievalRun | None = None
         if request.query.strip() and allowed:
-            stale = any(paper.ingestion_version != _local_index_version() for paper in candidates)
+            active_versions = {
+                paper.active_document_version_id
+                for paper in candidates
+                if paper.active_document_version_id is not None
+            }
+            stale = any(
+                paper.ingestion_version != _local_index_version()
+                or paper.active_document_version_id is None
+                for paper in candidates
+            )
             if stale:
                 raise ValidationError(
                     "本地论文库索引版本已变更，必须先执行“手动同步/增量重建”后再检索。"
                 )
 
-            # PostgreSQL is the authority for metadata and structural location.
-            # Fetch exactly the metadata-filtered children before either recall
-            # channel, so BM25 and Qdrant share the same eligible document set.
-            rows = (
+            # PostgreSQL owns lexical recall. ``lexical_terms`` is normalized
+            # with the same English/CJK tokeniser at write time, so this GIN
+            # index remains exact and bounded without copying the corpus into
+            # Python or silently truncating it at an arbitrary row limit.
+            lexical_query = " ".join(_bm25_tokens(request.query))
+            ts_query = func.plainto_tsquery("simple", lexical_query)
+            lexical_rows = (
                 await self.db.execute(
-                    select(LocalPaperChunk, LocalPaperSection)
-                    .join(LocalPaperSection, LocalPaperChunk.section_id == LocalPaperSection.id)
-                    .where(LocalPaperChunk.paper_id.in_(list(allowed)))
-                    .order_by(
-                        LocalPaperChunk.paper_id,
-                        LocalPaperChunk.page_number,
-                        LocalPaperChunk.chunk_index,
+                    select(
+                        LocalPaperChunk.id,
+                        func.ts_rank_cd(LocalPaperChunk.lexical_tsv, ts_query).label("score"),
                     )
-                    .limit(settings.LOCAL_PAPER_MAX_BM25_CORPUS)
+                    .where(
+                        LocalPaperChunk.paper_id.in_(list(allowed)),
+                        LocalPaperChunk.document_version_id.in_(list(active_versions)),
+                        LocalPaperChunk.lexical_tsv.op("@@")(ts_query),
+                    )
+                    .order_by(func.ts_rank_cd(LocalPaperChunk.lexical_tsv, ts_query).desc())
+                    .limit(settings.LOCAL_PAPER_BM25_CANDIDATE_LIMIT)
                 )
             ).all()
-            corpus: dict[UUID, RetrievalChunk] = {
-                chunk.id: RetrievalChunk(chunk=chunk, parent=section, paper=allowed[chunk.paper_id])
-                for chunk, section in rows
-            }
-            if not corpus:
-                return LocalPaperSearchResponse(items=[], total=0, retrieval_mode="hybrid")
-
-            corpus_items = list(corpus.values())
-            tokenized = [_bm25_tokens(item.lexical_text) for item in corpus_items]
-            query_tokens = _bm25_tokens(request.query)
-            bm25_scored: list[tuple[UUID, float]] = []
-            if query_tokens and any(tokenized):
-                bm25 = BM25Okapi(tokenized)
-                bm25_scored = sorted(
-                    (
-                        (item.chunk.id, float(score))
-                        for item, score in zip(
-                            corpus_items, bm25.get_scores(query_tokens), strict=True
-                        )
-                        if score > 0
-                    ),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )[: settings.LOCAL_PAPER_BM25_CANDIDATE_LIMIT]
+            bm25_scored = [(row.id, float(row.score)) for row in lexical_rows if row.score > 0]
 
             # The same PostgreSQL-eligible paper IDs are passed as a Qdrant
             # payload filter. No finite dense result is later discarded merely
@@ -1909,6 +2513,7 @@ class LocalPaperLibraryService:
                 query=request.query,
                 limit=settings.LOCAL_PAPER_DENSE_CANDIDATE_LIMIT,
                 paper_ids=list(allowed),
+                document_version_ids=list(active_versions),
             )
             dense_scored: list[tuple[UUID, float, list[float] | None]] = []
             for point in points:
@@ -1916,9 +2521,6 @@ class LocalPaperLibraryService:
                 try:
                     chunk_id = UUID(str(payload.get("chunk_id")))
                 except (ValueError, TypeError):
-                    continue
-                if chunk_id not in corpus:
-                    # Defensive consistency check for an interrupted re-index.
                     continue
                 raw_vector = getattr(point, "vector", None)
                 if isinstance(raw_vector, dict):
@@ -1929,13 +2531,39 @@ class LocalPaperLibraryService:
                 dense_scored.append((chunk_id, float(getattr(point, "score", 0.0)), vector))
 
             fused = _rrf_fuse(dense_scored, bm25_scored, rrf_k=settings.LOCAL_PAPER_RRF_K)
+            fused_ids = list(fused)
+            if not fused_ids:
+                return LocalPaperSearchResponse(items=[], total=0, retrieval_mode="hybrid")
+            rows = (
+                await self.db.execute(
+                    select(LocalPaperChunk, LocalPaperSection)
+                    .join(LocalPaperSection, LocalPaperChunk.section_id == LocalPaperSection.id)
+                    .where(
+                        LocalPaperChunk.id.in_(fused_ids),
+                        LocalPaperChunk.document_version_id.in_(list(active_versions)),
+                    )
+                )
+            ).all()
+            corpus: dict[UUID, RetrievalChunk] = {
+                chunk.id: RetrievalChunk(chunk=chunk, parent=section, paper=allowed[chunk.paper_id])
+                for chunk, section in rows
+                if chunk.paper_id in allowed
+            }
+            missing_vector_ids = [chunk_id for chunk_id in fused if chunk_id not in {item[0] for item in dense_scored}]
+            fetched_vectors = await self.index.fetch_chunk_vectors(
+                collection=library.qdrant_collection, chunk_ids=missing_vector_ids
+            )
             ranked = []
             for chunk_id, (rrf_score, vector_score, bm25_score, vector) in fused.items():
+                if chunk_id not in corpus:
+                    # Qdrant may retain a point from a worker crash; active
+                    # PostgreSQL children are the final consistency authority.
+                    continue
                 item = corpus[chunk_id]
                 item.rrf_score = rrf_score
                 item.vector_score = vector_score
                 item.bm25_score = bm25_score
-                item.vector = vector
+                item.vector = vector or fetched_vectors.get(chunk_id)
                 ranked.append(item)
             ranked.sort(key=lambda item: item.rrf_score, reverse=True)
 
@@ -2009,6 +2637,7 @@ class LocalPaperLibraryService:
                             bm25_score=item.bm25_score,
                             rrf_score=item.rrf_score,
                             rerank_score=item.rerank_score,
+                            mmr_score=item.mmr_score,
                             section_heading=item.parent.heading,
                             paragraph_index=item.chunk.paragraph_index,
                             bbox=item.chunk.bbox_json,
@@ -2036,6 +2665,37 @@ class LocalPaperLibraryService:
         # 实际返回的论文列表（受limit限制）
         result_items = ordered[: request.limit]
 
+        trace = {
+            "index_version": _local_index_version(),
+            "dense_top_k": settings.LOCAL_PAPER_DENSE_CANDIDATE_LIMIT,
+            "lexical_top_k": settings.LOCAL_PAPER_BM25_CANDIDATE_LIMIT,
+            "rerank_top_k": settings.LOCAL_PAPER_RERANK_CANDIDATE_LIMIT,
+            "rrf_k": settings.LOCAL_PAPER_RRF_K,
+            "mmr_lambda": settings.LOCAL_PAPER_MMR_LAMBDA,
+            "selected": [
+                {
+                    "paper_id": str(item.chunk.paper_id),
+                    "chunk_id": str(item.chunk.id),
+                    "vector_score": item.vector_score,
+                    "lexical_score": item.bm25_score,
+                    "rrf_score": item.rrf_score,
+                    "rerank_score": item.rerank_score,
+                    "mmr_score": item.mmr_score,
+                }
+                for item in eligible_candidates
+            ],
+        }
+        if request.query.strip() and allowed:
+            retrieval_run = LocalPaperRetrievalRun(
+                library_id=library.id,
+                owner_id=owner_id,
+                index_version=_local_index_version(),
+                request_json=request.model_dump(mode="json"),
+                summary_json=trace,
+            )
+            self.db.add(retrieval_run)
+            await self.db.flush()
+
         return LocalPaperSearchResponse(
             items=[
                 self._paper_read(
@@ -2058,6 +2718,8 @@ class LocalPaperLibraryService:
                 else 0
             ),
             insufficient_evidence=bool(request.query.strip() and allowed and not result_items),
+            retrieval_run_id=retrieval_run.id if retrieval_run else None,
+            trace=trace,
         )
 
     async def ask(
@@ -2073,14 +2735,20 @@ class LocalPaperLibraryService:
         # optional original search topic resolves anaphora such as “these
         # papers” without ever widening the corpus to unrelated documents.
         retrieval_query = "\n".join(part for part in [query_context, question] if part)
-        search = await self.search(
-            owner_id=owner_id,
-            request=LocalPaperSearchRequest(
-                query=retrieval_query,
-                paper_ids=paper_ids,
-                limit=limit,
-            ),
-        )
+        # Do not run MMR across the visible result set again: a user-selected
+        # set of papers is an explicit scope contract. Retrieve evidence within
+        # each selected paper, then state which papers lacked usable evidence.
+        scoped_items: list[LocalPaperRead] = []
+        for paper_id in paper_ids[:limit]:
+            scoped = await self.search(
+                owner_id=owner_id,
+                request=LocalPaperSearchRequest(
+                    query=retrieval_query,
+                    paper_ids=[paper_id],
+                    limit=1,
+                ),
+            )
+            scoped_items.extend(scoped.items)
         citations = [
             LocalPaperCitationRead(
                 paper_id=paper.id,
@@ -2092,7 +2760,7 @@ class LocalPaperLibraryService:
                 page_number=item.page_number,
                 text=item.text,
             )
-            for paper in search.items
+            for paper in scoped_items
             # The retrieval service already applies per-paper evidence and
             # duplicate constraints.  Preserve its top distinct chunks rather
             # than reducing every paper to a single arbitrary sentence.

@@ -8,7 +8,13 @@ export function cn(...inputs: ClassValue[]) {
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function getErrorMessage(err: unknown, fallback = "An unexpected error occurred"): string {
-  return err instanceof Error ? err.message : fallback;
+  if (!(err instanceof Error)) return fallback;
+  // Browsers intentionally expose no transport detail for a dropped BFF
+  // request.  Do not make an operator-facing page look like an opaque JS bug.
+  if (err.message === "Failed to fetch" || err.message === "NetworkError when attempting to fetch resource.") {
+    return "无法连接本地研究服务。任务仍会在后台继续；请稍后刷新查看审计结果。";
+  }
+  return err.message || fallback;
 }
 
 export function isAppAdmin(user: { role?: string } | null | undefined): boolean {

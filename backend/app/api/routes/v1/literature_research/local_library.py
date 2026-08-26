@@ -22,6 +22,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentAppAdmin, CurrentUser, CurrentUserWS, DBSession
 from app.api.routes.v1.literature_research.websocket_stream import iter_pubsub_until_disconnect
 from app.clients.redis import RedisClient
+from app.core.exceptions import AuthorizationError, NotFoundError
 from app.db.models.local_paper_library import (
     LocalPaperLibrary,
     LocalPaperSyncEvent,
@@ -31,16 +32,28 @@ from app.db.session import get_db_context
 from app.schemas.literature_research.local_library import (
     LocalLibraryStatusRead,
     LocalLibrarySyncAccepted,
+    LocalPaperAnalysisCreate,
+    LocalPaperAnalysisEventRead,
+    LocalPaperAnalysisJobRead,
+    LocalPaperAnalysisSessionCreate,
+    LocalPaperAnalysisSessionRead,
     LocalPaperAskRequest,
     LocalPaperAskResponse,
     LocalPaperExportRequest,
+    LocalPaperMemoryCandidateConfirm,
+    LocalPaperMemoryCandidateCreate,
+    LocalPaperMemoryCandidateRead,
     LocalPaperMindmapRequest,
     LocalPaperSearchRequest,
     LocalPaperSearchResponse,
 )
+from app.services.literature_research.local_paper_analysis import LocalPaperAnalysisService
 from app.services.literature_research.local_paper_library import LocalPaperLibraryService
 from app.services.literature_research.paper_mindmap_service import PaperMindmapService
-from app.worker.tasks.local_paper_library_tasks import sync_local_paper_library
+from app.worker.tasks.local_paper_library_tasks import (
+    run_local_paper_analysis,
+    sync_local_paper_library,
+)
 
 router = APIRouter()
 
@@ -224,6 +237,199 @@ async def search_local_library(
     body: LocalPaperSearchRequest, db: DBSession, current_user: CurrentUser
 ) -> object:
     return await LocalPaperLibraryService(db).search(owner_id=current_user.id, request=body)
+
+
+@router.post(
+    "/analysis-sessions",
+    response_model=LocalPaperAnalysisSessionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_local_library_analysis_session(
+    body: LocalPaperAnalysisSessionCreate, db: DBSession, current_user: CurrentUser
+) -> object:
+    """Create durable audit/session state; Redis is only its short-lived cache."""
+    session = await LocalPaperAnalysisService(db).create_session(
+        owner_id=current_user.id, body=body
+    )
+    await db.commit()
+    return session
+
+
+@router.get("/analysis-sessions/{session_id}", response_model=LocalPaperAnalysisSessionRead)
+async def get_local_library_analysis_session(
+    session_id: UUID, db: DBSession, current_user: CurrentUser
+) -> object:
+    return await LocalPaperAnalysisService(db).get_session(
+        session_id=session_id, owner_id=current_user.id
+    )
+
+
+@router.post(
+    "/analysis-jobs", response_model=LocalPaperAnalysisJobRead, status_code=status.HTTP_202_ACCEPTED
+)
+async def create_local_library_analysis_job(
+    body: LocalPaperAnalysisCreate, response: Response, db: DBSession, current_user: CurrentUser
+) -> object:
+    service = LocalPaperAnalysisService(db)
+    job, created = await service.create_job(owner_id=current_user.id, body=body)
+    await db.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
+        return job
+    try:
+        run_local_paper_analysis.apply_async(args=(str(job.id),), queue="research-llm")
+    except Exception as exc:
+        # Do not report a queued job that no worker can ever observe.
+        job.status, job.error_code, job.error_message = (
+            "FAILED",
+            "QUEUE_UNAVAILABLE",
+            type(exc).__name__,
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="分析队列不可用"
+        ) from exc
+    return job
+
+
+@router.get("/analysis-jobs/{job_id}", response_model=LocalPaperAnalysisJobRead)
+async def get_local_library_analysis_job(
+    job_id: UUID, db: DBSession, current_user: CurrentUser
+) -> object:
+    return await LocalPaperAnalysisService(db).get_job(job_id=job_id, owner_id=current_user.id)
+
+
+@router.post("/analysis-jobs/{job_id}:cancel", response_model=LocalPaperAnalysisJobRead)
+async def cancel_local_library_analysis_job(
+    job_id: UUID, db: DBSession, current_user: CurrentUser
+) -> object:
+    job = await LocalPaperAnalysisService(db).request_cancel(
+        job_id=job_id, owner_id=current_user.id
+    )
+    await db.commit()
+    return job
+
+
+@router.get("/analysis-jobs/{job_id}/events", response_model=list[LocalPaperAnalysisEventRead])
+async def list_local_library_analysis_events(
+    job_id: UUID,
+    db: DBSession,
+    current_user: CurrentUser,
+    after_sequence: int = Query(default=0, ge=0),
+) -> object:
+    return await LocalPaperAnalysisService(db).list_events(
+        job_id=job_id, owner_id=current_user.id, after_sequence=after_sequence
+    )
+
+
+@router.websocket("/analysis-jobs/{job_id}/stream")
+async def stream_local_library_analysis_job(
+    websocket: WebSocket,
+    job_id: UUID,
+    user: CurrentUserWS,
+    after_sequence: int = Query(default=0, ge=0),
+) -> None:
+    """Replay persisted analysis events once, then fan out Redis notifications."""
+    async with get_db_context() as db:
+        service = LocalPaperAnalysisService(db)
+        try:
+            events = await service.list_events(
+                job_id=job_id, owner_id=user.id, after_sequence=after_sequence
+            )
+        except (AuthorizationError, NotFoundError):
+            await websocket.close(code=4403)
+            return
+    redis: RedisClient = websocket.state.redis
+    pubsub = redis.raw.pubsub()
+    await pubsub.subscribe(f"local_paper_analysis:{job_id}")
+    subprotocol = getattr(websocket.state, "accept_subprotocol", None)
+    await websocket.accept(subprotocol=subprotocol)
+    last_sequence = after_sequence
+    try:
+        for event in events:
+            payload = dict(event.payload_json)
+            await websocket.send_json(payload)
+            last_sequence = max(last_sequence, event.sequence)
+        async for message in iter_pubsub_until_disconnect(websocket, pubsub):
+            if message["type"] != "message":
+                continue
+            raw = message["data"]
+            payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            data = payload.get("data", {})
+            sequence = int(data.get("sequence", 0)) if isinstance(data, dict) else 0
+            if sequence <= last_sequence:
+                continue
+            await websocket.send_json(payload)
+            last_sequence = sequence
+    except WebSocketDisconnect:
+        return
+    finally:
+        await pubsub.unsubscribe(f"local_paper_analysis:{job_id}")
+        await pubsub.aclose()
+
+
+@router.get("/analysis-jobs/{job_id}/artifact")
+async def download_local_library_analysis_artifact(
+    job_id: UUID, db: DBSession, current_user: CurrentUser
+) -> Response:
+    content, output_format, digest = await LocalPaperAnalysisService(db).artifact(
+        job_id=job_id, owner_id=current_user.id
+    )
+    extension = "opml" if output_format == "opml" else "md"
+    return Response(
+        content=content,
+        media_type="text/x-opml; charset=utf-8"
+        if extension == "opml"
+        else "text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="local-paper-analysis-{job_id}.{extension}"',
+            "X-Content-SHA256": digest,
+        },
+    )
+
+
+@router.post(
+    "/analysis-jobs/{job_id}/memory-candidates",
+    response_model=LocalPaperMemoryCandidateRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_local_library_memory_candidate(
+    job_id: UUID, body: LocalPaperMemoryCandidateCreate, db: DBSession, current_user: CurrentUser
+) -> object:
+    row = await LocalPaperAnalysisService(db).create_memory_candidate(
+        job_id=job_id, owner_id=current_user.id, body=body
+    )
+    await db.commit()
+    return row
+
+
+@router.post(
+    "/memory-candidates/{candidate_id}:confirm", response_model=LocalPaperMemoryCandidateRead
+)
+async def confirm_local_library_memory_candidate(
+    candidate_id: UUID,
+    body: LocalPaperMemoryCandidateConfirm,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> object:
+    row = await LocalPaperAnalysisService(db).confirm_memory_candidate(
+        candidate_id=candidate_id,
+        owner_id=current_user.id,
+        confirmation_note=body.confirmation_note,
+    )
+    await db.commit()
+    return row
+
+
+@router.post("/projects/{project_id}:grant", status_code=status.HTTP_204_NO_CONTENT)
+async def grant_project_local_library(
+    project_id: UUID, db: DBSession, current_user: CurrentUser
+) -> Response:
+    await LocalPaperAnalysisService(db).grant_project(
+        owner_id=current_user.id, project_id=project_id
+    )
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/ask", response_model=LocalPaperAskResponse)

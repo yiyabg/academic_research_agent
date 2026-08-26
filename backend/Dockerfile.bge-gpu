@@ -14,6 +14,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     /app/.venv/bin/python -m ensurepip --upgrade && \
     /app/.venv/bin/python -m pip install --upgrade --force-reinstall \
       --index-url=${PYTORCH_CUDA_INDEX} torch==${PYTORCH_CUDA_VERSION} && \
+    # This image serves text-only BGE models. Docling's CPU image dependency
+    # on torchvision is unnecessary here and its wheel ABI may not match the
+    # explicitly selected CUDA torch wheel, preventing transformers import.
+    /app/.venv/bin/python -m pip uninstall -y torchvision && \
     /app/.venv/bin/python -c "import torch; assert torch.version.cuda, torch.__version__"
 
 USER appuser

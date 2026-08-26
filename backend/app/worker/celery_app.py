@@ -34,7 +34,15 @@ celery_app.conf.update(
         "app.worker.tasks.rag_tasks.sync_collection_task": {"queue": "research-io"},
         "app.worker.tasks.rag_tasks.sync_single_source_task": {"queue": "research-io"},
         "app.worker.tasks.rag_tasks.ingest_document_task": {"queue": "research-cpu"},
-        "app.worker.tasks.local_paper_library_tasks.sync_local_paper_library": {"queue": "research-cpu"},
+        "app.worker.tasks.local_paper_library_tasks.sync_local_paper_library": {
+            "queue": "research-cpu"
+        },
+        "app.worker.tasks.local_paper_library_tasks.run_local_paper_analysis": {
+            "queue": "research-llm"
+        },
+        "app.worker.tasks.local_paper_library_tasks.check_scheduled_local_paper_syncs": {
+            "queue": "research-cpu"
+        },
     },
 )
 
@@ -52,5 +60,9 @@ celery_app.conf.beat_schedule = {
     "recover-stalled-research-runs": {
         "task": "app.worker.tasks.literature_research_tasks.recover_stalled_research_runs",
         "schedule": 60.0,
+    },
+    "local-paper-incremental-sync": {
+        "task": "app.worker.tasks.local_paper_library_tasks.check_scheduled_local_paper_syncs",
+        "schedule": settings.LOCAL_PAPER_SYNC_INTERVAL_SECONDS,
     },
 }

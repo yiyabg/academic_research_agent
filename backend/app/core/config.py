@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     AI_FRAMEWORK: str = "pydantic_ai"
     LLM_PROVIDER: Literal["openai", "deepseek", "openai_compatible"] = "openai"
     LLM_BASE_URL: str = ""
+    # Local-paper reports are long-running jobs.  A compatible gateway can be
+    # unavailable while the official OpenAI endpoint remains healthy; the
+    # fallback is deliberately opt-in and every attempt is retained in audit.
+    LOCAL_PAPER_ANALYSIS_ENABLE_OPENAI_FALLBACK: bool = True
+    LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL: str = "gpt-5.4"
 
     @model_validator(mode="after")
     def validate_llm_provider_model_pair(self) -> "Settings":
@@ -278,17 +283,31 @@ class Settings(BaseSettings):
     # Bound local service calls even when a single PDF yields many child chunks.
     LOCAL_PAPER_EMBEDDING_BATCH_SIZE: int = Field(default=64, ge=1, le=512)
     LOCAL_PAPER_RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
-    # v6 eliminates repeated extraction artefacts and bounds image inventory
-    # OCR, therefore all previous children are rebuilt into a fresh versioned
-    # Qdrant collection by the active manual sync.
-    LOCAL_PAPER_INGESTION_VERSION: str = "structured-parent-child-bge-v6"
-    # Small children are indexed; page-bound sections are retained as parents
-    # and supplied to the deep-analysis flow.
-    LOCAL_PAPER_CHUNK_SIZE: int = Field(default=800, ge=200, le=2000)
-    LOCAL_PAPER_CHUNK_OVERLAP: int = Field(default=120, ge=0, le=600)
-    LOCAL_PAPER_DENSE_CANDIDATE_LIMIT: int = Field(default=100, ge=10, le=500)
-    LOCAL_PAPER_BM25_CANDIDATE_LIMIT: int = Field(default=100, ge=10, le=500)
-    LOCAL_PAPER_RERANK_CANDIDATE_LIMIT: int = Field(default=40, ge=5, le=100)
+    # v7 is a clean, document-versioned rebuild: Docling provides structure,
+    # BGE token boundaries define children, and only active versions are read.
+    LOCAL_PAPER_INGESTION_VERSION: str = "docling-parent-child-bge-v7"
+    # A v7 PDF must be structurally parsed by Docling. PyMuPDF remains only
+    # for page locators and figure crops after Docling succeeds; it must not
+    # silently become the structure parser because artifacts are unavailable.
+    LOCAL_PAPER_REQUIRE_DOCLING: bool = True
+    LOCAL_PAPER_CHUNK_SIZE: int = Field(default=500, ge=128, le=2000)
+    LOCAL_PAPER_CHUNK_OVERLAP: int = Field(default=64, ge=0, le=600)
+    LOCAL_PAPER_PARENT_MAX_TOKENS: int = Field(default=1500, ge=500, le=8000)
+    # Scheduled sync stays incremental because the source hash/version gates
+    # extraction and embeddings. Operators may still trigger an immediate run.
+    LOCAL_PAPER_SYNC_INTERVAL_SECONDS: int = Field(default=300, ge=60, le=86400)
+    # A compatible gateway must not keep an auditable job in SYNTHESIZING for
+    # several minutes through SDK-level retries.  These are hard per-attempt
+    # budgets; a failure yields an evidence-backed PARTIAL report.
+    LOCAL_PAPER_ANALYSIS_PRIMARY_TIMEOUT_SECONDS: float = Field(
+        default=45.0, ge=5.0, le=300.0
+    )
+    LOCAL_PAPER_ANALYSIS_FALLBACK_TIMEOUT_SECONDS: float = Field(
+        default=60.0, ge=5.0, le=300.0
+    )
+    LOCAL_PAPER_DENSE_CANDIDATE_LIMIT: int = Field(default=150, ge=10, le=500)
+    LOCAL_PAPER_BM25_CANDIDATE_LIMIT: int = Field(default=150, ge=10, le=500)
+    LOCAL_PAPER_RERANK_CANDIDATE_LIMIT: int = Field(default=60, ge=5, le=200)
     # Recall is chunk-based, but a single long paper must not consume the
     # reranker budget.  Diversity begins before reranking, not afterwards.
     LOCAL_PAPER_MAX_RERANK_CHUNKS_PER_PAPER: int = Field(default=2, ge=1, le=10)
@@ -305,9 +324,11 @@ class Settings(BaseSettings):
     LOCAL_PAPER_RERANK_MIN_SCORE: float = Field(default=0.15, ge=0.0, le=1.0)
     LOCAL_PAPER_RRF_K: int = Field(default=60, ge=1, le=200)
     LOCAL_PAPER_MMR_LAMBDA: float = Field(default=0.75, ge=0.0, le=1.0)
-    LOCAL_PAPER_MAX_BM25_CORPUS: int = Field(default=50000, ge=100, le=200000)
-    LOCAL_PAPER_OCR_MIN_TEXT_CHARS: int = Field(default=80, ge=0, le=5000)
-    LOCAL_PAPER_ENABLE_FIGURE_OCR: bool = True
+    # Kept only for backward compatibility. v7 uses PostgreSQL FTS, so this
+    # cap must never truncate the lexical corpus.
+    LOCAL_PAPER_MAX_BM25_CORPUS: int = Field(default=200000, ge=100, le=1000000)
+    LOCAL_PAPER_OCR_MIN_TEXT_CHARS: int = Field(default=40, ge=0, le=5000)
+    LOCAL_PAPER_ENABLE_FIGURE_OCR: bool = False
     LOCAL_PAPER_MAX_FIGURES_PER_PAGE: int = Field(default=8, ge=1, le=32)
     LOCAL_PAPER_MAX_FIGURE_OCR_PER_PAGE: int = Field(default=4, ge=0, le=16)
     LOCAL_PAPER_MAX_IMAGE_RESOURCES_FOR_FALLBACK: int = Field(default=64, ge=1, le=1000)

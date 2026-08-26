@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.schemas.base import BaseSchema
 
@@ -86,6 +86,7 @@ class LocalPaperEvidenceRead(BaseSchema):
     bm25_score: float | None = None
     rrf_score: float | None = None
     rerank_score: float | None = None
+    mmr_score: float | None = None
     section_heading: str | None = None
     paragraph_index: int | None = None
     bbox: list[float] | None = None
@@ -118,6 +119,8 @@ class LocalPaperSearchResponse(BaseSchema):
     candidate_papers: int = 0
     rejected_by_score: int = 0
     insufficient_evidence: bool = False
+    retrieval_run_id: UUID | None = None
+    trace: dict[str, object] = Field(default_factory=dict)
 
 
 class LocalPaperAskRequest(BaseSchema):
@@ -144,6 +147,112 @@ class LocalPaperAskResponse(BaseSchema):
     answer: str
     generated_by_llm: bool
     citations: list[LocalPaperCitationRead]
+
+
+AnalysisMode = Literal["focused", "comparative", "comprehensive"]
+AnalysisOutputFormat = Literal["markdown", "opml"]
+AnalysisJobStatus = Literal[
+    "QUEUED",
+    "RETRIEVING",
+    "ANALYZING",
+    "SYNTHESIZING",
+    "RENDERING",
+    "COMPLETED",
+    "PARTIAL",
+    "FAILED",
+    "CANCELLED",
+]
+
+
+class LocalPaperAnalysisSessionCreate(BaseSchema):
+    title: str = Field(default="本地文献分析", min_length=1, max_length=255)
+    project_id: UUID | None = None
+
+
+class LocalPaperAnalysisSessionRead(BaseSchema):
+    id: UUID
+    library_id: UUID
+    owner_id: UUID
+    project_id: UUID | None = None
+    title: str
+    summary: dict[str, object] = Field(validation_alias="summary_json")
+    is_archived: bool
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class LocalPaperAnalysisCreate(BaseSchema):
+    """One asynchronous deep-analysis contract for former Q&A and mind-map flows."""
+
+    question: str = Field(min_length=3, max_length=4000)
+    query: str | None = Field(default=None, max_length=1000)
+    paper_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=50)
+    limit: int = Field(default=8, ge=1, le=50)
+    mode: AnalysisMode = "focused"
+    output_format: AnalysisOutputFormat = "markdown"
+    session_id: UUID | None = None
+    project_id: UUID | None = None
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def has_a_retrieval_scope(self) -> "LocalPaperAnalysisCreate":
+        if not (self.query and self.query.strip()) and not self.paper_ids:
+            raise ValueError("analysis requires query or paper_ids")
+        return self
+
+
+class LocalPaperAnalysisEventRead(BaseSchema):
+    sequence: int
+    event_type: str
+    payload: dict[str, object] = Field(validation_alias="payload_json")
+    event_hash: str
+    created_at: datetime
+
+
+class LocalPaperAnalysisJobRead(BaseSchema):
+    id: UUID
+    session_id: UUID
+    library_id: UUID
+    owner_id: UUID
+    project_id: UUID | None = None
+    mode: str
+    status: AnalysisJobStatus
+    question: str
+    retrieval_run_id: UUID | None = None
+    result: dict[str, object] = Field(validation_alias="result_json")
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class LocalPaperAnalysisArtifactRead(BaseSchema):
+    content: str
+    output_format: AnalysisOutputFormat
+    sha256: str
+
+
+class LocalPaperMemoryCandidateRead(BaseSchema):
+    id: UUID
+    candidate: dict[str, object] = Field(validation_alias="candidate_json")
+    status: str
+    created_at: datetime
+
+
+class LocalPaperMemoryCandidateCreate(BaseSchema):
+    """Only user preferences/formatting may enter the confirmation queue."""
+
+    preferences: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def has_a_preference(self) -> "LocalPaperMemoryCandidateCreate":
+        if not self.preferences:
+            raise ValueError("memory candidate requires at least one preference")
+        return self
+
+
+class LocalPaperMemoryCandidateConfirm(BaseSchema):
+    confirmation_note: str = Field(min_length=3, max_length=1000)
 
 
 class LocalPaperExportRequest(LocalPaperSearchRequest):

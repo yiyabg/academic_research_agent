@@ -85,11 +85,72 @@ def build_llm_provider() -> OpenAIProvider | DeepSeekProvider:
     return OpenAIProvider(openai_client=client)
 
 
+def build_local_paper_analysis_model(
+    *,
+    fallback_to_official_openai: bool = False,
+) -> OpenAIResponsesModel:
+    """Create the bounded, no-retry model used by durable local-paper jobs.
+
+    The normal application client may reasonably use provider retries.  An
+    asynchronous job has a stricter contract: a failing gateway must reach a
+    durable PARTIAL/FAILED state promptly, with the failed attempt recorded.
+    """
+    timeout = (
+        settings.LOCAL_PAPER_ANALYSIS_FALLBACK_TIMEOUT_SECONDS
+        if fallback_to_official_openai
+        else settings.LOCAL_PAPER_ANALYSIS_PRIMARY_TIMEOUT_SECONDS
+    )
+    if fallback_to_official_openai:
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not configured for the fallback provider")
+        client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            timeout=timeout,
+            max_retries=0,
+        )
+        return OpenAIResponsesModel(
+            settings.LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL,
+            provider=OpenAIProvider(openai_client=client),
+        )
+
+    provider = selected_llm_provider()
+    api_key = selected_llm_api_key()
+    if not api_key:
+        raise RuntimeError(f"{selected_llm_credential_name()} is not configured")
+    if provider == "deepseek":
+        # DeepSeekProvider owns its endpoint configuration; the outer timeout
+        # in PaperMindmapService remains the authoritative job budget.
+        return OpenAIResponsesModel(settings.AI_MODEL, provider=DeepSeekProvider(api_key=api_key))
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=settings.LLM_BASE_URL.rstrip("/") if provider == "openai_compatible" else None,
+        timeout=timeout,
+        max_retries=0,
+    )
+    return OpenAIResponsesModel(settings.AI_MODEL, provider=OpenAIProvider(openai_client=client))
+
+
 def build_llm_model(model_name: str | None = None) -> OpenAIResponsesModel:
     """Build the Responses-compatible model used by assistants and experts."""
     return OpenAIResponsesModel(
         model_name or settings.AI_MODEL,
         provider=build_llm_provider(),
+    )
+
+
+def build_official_openai_model(model_name: str | None = None) -> OpenAIResponsesModel:
+    """Build the audited emergency path for local-paper analysis jobs only.
+
+    It intentionally never reuses ``LLM_BASE_URL``.  A configured compatible
+    proxy may be the failing dependency, whereas this provider is the official
+    OpenAI endpoint.  Callers must still record both attempts and surface the
+    fallback in the report metadata.
+    """
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured for the fallback provider")
+    return OpenAIResponsesModel(
+        model_name or settings.LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL,
+        provider=OpenAIProvider(api_key=settings.OPENAI_API_KEY),
     )
 
 
@@ -164,9 +225,7 @@ async def probe_llm_provider(*, timeout_seconds: float = 5.0) -> dict[str, Any]:
             "model": settings.AI_MODEL,
             "detail": "LLM provider probe failed",
             "probe": (
-                "responses.create"
-                if provider_name == "openai_compatible"
-                else "models.retrieve"
+                "responses.create" if provider_name == "openai_compatible" else "models.retrieve"
             ),
             "error_type": type(exc).__name__,
             "status_code": getattr(exc, "status_code", None),

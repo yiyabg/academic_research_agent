@@ -38,6 +38,7 @@ import type {
 import { useResearchOrganizationStore } from "@/stores";
 
 const RESEARCH_DRAFT_SESSION_KEY = "academic-research:l1-draft-session";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function dateMonthsAgo(months: number) {
   const date = new Date();
@@ -70,8 +71,10 @@ export default function NewResearchPage() {
   const restoredSession = useRef(false);
   useEffect(() => {
     const existing = window.localStorage.getItem(RESEARCH_DRAFT_SESSION_KEY);
-    const id = existing || createClientId("research-session");
-    if (!existing) window.localStorage.setItem(RESEARCH_DRAFT_SESSION_KEY, id);
+    // The L1 API is deliberately UUID-keyed.  Replace the old human-readable
+    // client id once so existing browsers stop issuing a permanent 422.
+    const id = existing && UUID_RE.test(existing) ? existing : crypto.randomUUID();
+    if (id !== existing) window.localStorage.setItem(RESEARCH_DRAFT_SESSION_KEY, id);
     setSessionId(id);
   }, []);
   const sessionMemory = useQuery({

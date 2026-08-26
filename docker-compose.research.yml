@@ -61,6 +61,7 @@ services:
     env_file: [./backend/.env]
     environment:
       - MODELS_CACHE_DIR=/app/models_cache
+      - DOCLING_SERVE_ARTIFACTS_PATH=/app/models_cache/docling-v7
       - HTTP_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
       - HTTPS_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
       - ALL_PROXY=${MODEL_DOWNLOAD_HTTP_PROXY:-}
@@ -85,6 +86,7 @@ services:
     env_file: [./backend/.env]
     environment:
       - MODELS_CACHE_DIR=/app/models_cache
+      - DOCLING_SERVE_ARTIFACTS_PATH=/app/models_cache/docling-v7
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
       - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,bge-embedding,bge-reranker}
@@ -167,6 +169,7 @@ services:
       # volume; runtime workers must not pause to perform Hub revision checks.
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
+      - DOCLING_SERVE_ARTIFACTS_PATH=/app/models_cache/docling-v7
       - HTTPS_PROXY=${RUNTIME_HTTPS_PROXY:-}
       - NO_PROXY=${RUNTIME_NO_PROXY:-localhost,127.0.0.1,db,redis,qdrant,minio,grobid,clamav,bge-embedding,bge-reranker}
     networks: [backend]

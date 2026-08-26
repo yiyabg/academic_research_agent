@@ -24,6 +24,7 @@ import type {
   ResearchSessionMemory,
   LocalLibraryStatus,
   LocalPaperSearchResponse,
+  LocalPaperAnalysisJob,
 } from "@/types/literature-research";
 
 const base = "/research";
@@ -42,6 +43,16 @@ export const literatureResearchApi = {
     apiClient.post<{ answer: string; generated_by_llm: boolean; citations: Array<{ paper_id: string; citekey: string; title: string; doi?: string | null; authors: string[]; publication_year?: number | null; page_number: number; text: string }> }>(`${base}/local-library/ask`, body),
   analyzePapersMindmap: (body: Record<string, unknown>) =>
     apiClient.post<Blob>(`${base}/local-library/mindmap`, body),
+  createLocalPaperAnalysis: (body: {
+    question: string; query?: string; paper_ids?: string[]; limit?: number;
+    mode?: "focused" | "comparative" | "comprehensive";
+    output_format?: "markdown" | "opml"; session_id?: string; project_id?: string;
+    client_request_id?: string;
+  }) => apiClient.post<LocalPaperAnalysisJob>(`${base}/local-library/analysis-jobs`, body),
+  localPaperAnalysisJob: (jobId: string) =>
+    apiClient.get<LocalPaperAnalysisJob>(`${base}/local-library/analysis-jobs/${jobId}`),
+  cancelLocalPaperAnalysis: (jobId: string) =>
+    apiClient.post<LocalPaperAnalysisJob>(`${base}/local-library/analysis-jobs/${jobId}:cancel`),
   listOrganizations: () => apiClient.get<ResearchOrganization[]>(`${base}/organizations`),
   createOrganization: (body: { name: string; slug: string }) =>
     apiClient.post<ResearchOrganization>(`${base}/organizations`, body),

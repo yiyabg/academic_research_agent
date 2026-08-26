@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import fitz
@@ -282,7 +282,13 @@ def test_internal_bge_http_apps_load_only_their_own_python_models(monkeypatch) -
     assert reranker_response.scores == [0.25, 1.25]
 
 
-def test_structured_pdf_extraction_preserves_parent_section_paragraph_and_bbox(tmp_path) -> None:
+def test_structured_pdf_extraction_preserves_parent_section_paragraph_and_bbox(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_REQUIRE_DOCLING",
+        False,
+    )
     path = tmp_path / "paper.pdf"
     document = fitz.open()
     page = document.new_page()
@@ -303,7 +309,11 @@ def test_structured_pdf_extraction_preserves_parent_section_paragraph_and_bbox(t
     assert "Second paragraph" in section.content
 
 
-def test_structured_source_pages_keep_heading_for_deep_analysis_extractors(tmp_path) -> None:
+def test_structured_source_pages_keep_heading_for_deep_analysis_extractors(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_REQUIRE_DOCLING",
+        False,
+    )
     path = tmp_path / "sections.pdf"
     document = fitz.open()
     page = document.new_page()
@@ -324,6 +334,10 @@ def test_structured_source_pages_keep_heading_for_deep_analysis_extractors(tmp_p
 def test_figure_is_cropped_for_ocr_and_persistable_as_location_evidence(
     tmp_path, monkeypatch
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_REQUIRE_DOCLING",
+        False,
+    )
     path = tmp_path / "figure.pdf"
     # Create valid pixels through PyMuPDF itself so the test is codec-independent.
     png = fitz.Pixmap(fitz.csRGB, 2, 2, b"\xff\xff\xff" * 4, False).tobytes("png")
@@ -336,6 +350,10 @@ def test_figure_is_cropped_for_ocr_and_persistable_as_location_evidence(
     monkeypatch.setattr(
         "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_OCR_MIN_TEXT_CHARS",
         0,
+    )
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_ENABLE_FIGURE_OCR",
+        True,
     )
     monkeypatch.setattr(
         "app.services.literature_research.local_paper_library.subprocess.run",
@@ -353,6 +371,10 @@ def test_figure_is_cropped_for_ocr_and_persistable_as_location_evidence(
 def test_figure_caption_ocr_and_single_body_reference_share_figure_index(
     tmp_path, monkeypatch
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_REQUIRE_DOCLING",
+        False,
+    )
     path = tmp_path / "figure-links.pdf"
     png = fitz.Pixmap(fitz.csRGB, 2, 2, b"\xff\xff\xff" * 4, False).tobytes("png")
     document = fitz.open()
@@ -366,6 +388,10 @@ def test_figure_caption_ocr_and_single_body_reference_share_figure_index(
     monkeypatch.setattr(
         "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_OCR_MIN_TEXT_CHARS",
         0,
+    )
+    monkeypatch.setattr(
+        "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_ENABLE_FIGURE_OCR",
+        True,
     )
     monkeypatch.setattr(
         "app.services.literature_research.local_paper_library.subprocess.run",
@@ -536,7 +562,9 @@ async def test_qdrant_upsert_batches_long_paper_children_without_reordering(monk
     await index.replace_paper_chunks(collection="local_test", paper_id=paper_id, chunks=chunks)
 
     assert embedder.calls == [["first", "second"], ["third"]]
-    assert [point.payload["content"] for point in client.points] == ["first", "second", "third"]
+    assert [point.payload["chunk_id"] for point in client.points] == [
+        str(chunk.chunk_id) for chunk in chunks
+    ]
 
 
 class _FakeIndex:
@@ -547,6 +575,9 @@ class _FakeIndex:
     async def search(self, **kwargs):
         self.calls.append(kwargs)
         return [self.point]
+
+    async def fetch_chunk_vectors(self, **_kwargs):
+        return {}
 
 
 class _FakeReranker:
@@ -560,7 +591,8 @@ class _FakeReranker:
 
 @pytest.mark.anyio
 async def test_hybrid_service_executes_metadata_filtered_dense_bm25_rrf_and_bge() -> None:
-    owner_id, library_id, paper_id, section_id, chunk_id = (
+    owner_id, library_id, paper_id, version_id, section_id, chunk_id = (
+        uuid4(),
         uuid4(),
         uuid4(),
         uuid4(),
@@ -588,10 +620,12 @@ async def test_hybrid_service_executes_metadata_filtered_dense_bm25_rrf_and_bge(
         source_sha256="a" * 64,
         ingestion_version=_local_index_version(),
         bibtex_entry="@article{paper}",
+        active_document_version_id=version_id,
     )
     section = LocalPaperSection(
         id=section_id,
         paper_id=paper_id,
+        document_version_id=version_id,
         page_number=4,
         section_index=0,
         heading="3 Method",
@@ -603,6 +637,7 @@ async def test_hybrid_service_executes_metadata_filtered_dense_bm25_rrf_and_bge(
     chunk = LocalPaperChunk(
         id=chunk_id,
         paper_id=paper_id,
+        document_version_id=version_id,
         section_id=section_id,
         page_number=4,
         chunk_index=2,
@@ -619,9 +654,15 @@ async def test_hybrid_service_executes_metadata_filtered_dense_bm25_rrf_and_bge(
         vector=[1.0, 0.0],
     )
     db = AsyncMock()
+    db.add = MagicMock()
     db.scalar = AsyncMock(return_value=library)
     db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [paper]))
-    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [(chunk, section)]))
+    db.execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(all=lambda: [SimpleNamespace(id=chunk_id, score=0.7)]),
+            SimpleNamespace(all=lambda: [(chunk, section)]),
+        ]
+    )
     index, reranker = _FakeIndex(point), _FakeReranker()
     service = LocalPaperLibraryService(db, index=index, reranker=reranker)
 
