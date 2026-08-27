@@ -74,7 +74,11 @@ class LocalPaper(Base, TimestampMixin):
         UUID(as_uuid=True), nullable=True, index=True
     )
 
-    # Structured key sections for deep analysis
+    # Normalized metadata fields
+    venue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keywords_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+
+    # DEPRECATED: Structured key sections - use LocalPaperSection with section_type instead
     abstract_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     introduction_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     conclusion_text: Mapped[str | None] = mapped_column(Text, nullable=True)

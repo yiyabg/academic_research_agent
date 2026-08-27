@@ -70,6 +70,8 @@ class LocalPaperSearchRequest(BaseSchema):
     bibtex_type: str | None = Field(default=None, max_length=64)
     year_from: int | None = Field(default=None, ge=1000, le=3000)
     year_to: int | None = Field(default=None, ge=1000, le=3000)
+    venue: str | None = Field(default=None, max_length=500)
+    keywords: list[str] | None = Field(default=None, max_length=20)
     # Internal/UI scope restriction used by grounded question answering.  The
     # service still applies the owner and INDEXED predicates, so IDs never
     # bypass private-library authorization.
@@ -88,10 +90,15 @@ class LocalPaperEvidenceRead(BaseSchema):
     rerank_score: float | None = None
     mmr_score: float | None = None
     section_heading: str | None = None
+    section_type: str | None = None
     paragraph_index: int | None = None
     bbox: list[float] | None = None
     figure_id: UUID | None = None
     parent_text: str | None = None
+    # Full lineage for evidence traceability
+    chunk_id: UUID | None = None
+    section_id: UUID | None = None
+    document_version_id: UUID | None = None
 
 
 class LocalPaperRead(BaseSchema):
@@ -104,11 +111,21 @@ class LocalPaperRead(BaseSchema):
     bibtex_type: str
     source_kind: Literal["pdf", "html"]
     relative_source_path: str
+    venue: str | None = None
+    keywords: list[str] = Field(default_factory=list)
     evidence: list[LocalPaperEvidenceRead] = Field(default_factory=list)
-    # Structured sections for deep analysis
-    abstract_text: str | None = None
-    introduction_text: str | None = None
-    conclusion_text: str | None = None
+    # DEPRECATED: Use LocalPaperSection with section_type instead
+    abstract_text: str | None = Field(default=None, deprecated=True)
+    introduction_text: str | None = Field(default=None, deprecated=True)
+    conclusion_text: str | None = Field(default=None, deprecated=True)
+
+
+class QueryInterpretation(BaseSchema):
+    raw_query: str
+    semantic_query: str
+    effective_filters: dict[str, object] = Field(default_factory=dict)
+    filter_sources: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class LocalPaperSearchResponse(BaseSchema):
@@ -120,6 +137,7 @@ class LocalPaperSearchResponse(BaseSchema):
     rejected_by_score: int = 0
     insufficient_evidence: bool = False
     retrieval_run_id: UUID | None = None
+    query_interpretation: QueryInterpretation | None = None
     trace: dict[str, object] = Field(default_factory=dict)
 
 

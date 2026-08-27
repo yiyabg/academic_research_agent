@@ -62,6 +62,10 @@ dependencies = [
     # Keep general-purpose API/I/O containers CPU-only; a GPU worker can use
     # a dedicated image instead of pulling CUDA runtimes into every service.
     "torch>=2.7,<3",
+    # Keep torchvision on the same official CPU index as torch. Installing the
+    # PyPI wheel beside a +cpu torch wheel omits torchvision::nms and prevents
+    # Transformers / sentence-transformers from importing.
+    "torchvision>=0.28,<0.29",
     "pymupdf>=1.25.0",
     "docling>=2.0.0",
     "pillow>=10.0.0",
@@ -103,6 +107,9 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 

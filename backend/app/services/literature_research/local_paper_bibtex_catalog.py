@@ -106,6 +106,50 @@ def normalize_doi(value: str | None) -> str | None:
     return cleaned.lower() or None
 
 
-def publication_year(value: str | None) -> int | None:
+def publication_year(value: str | None, date: str | None = None) -> int | None:
+    """Extract publication year from year or date field.
+
+    Tries 'year' first, then falls back to 'date' if year is missing.
+    Does NOT use urldate or PDF copyright dates.
+    """
     match = re.search(r"\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b", value or "")
-    return int(match.group(1)) if match else None
+    if match:
+        return int(match.group(1))
+    # Fallback to date field if year is missing
+    if date:
+        match = re.search(r"\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b", date)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def venue(entry: BibEntry) -> str | None:
+    """Extract normalized venue from journal/booktitle.
+
+    Only extracts from actual publication venue fields, not publisher/school.
+    """
+    for field in ["journal", "journaltitle", "booktitle"]:
+        value = entry.fields.get(field)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def keywords(entry: BibEntry) -> list[str]:
+    """Extract keywords list from Better BibTeX keywords field.
+
+    Returns deduplicated, non-empty keywords.
+    """
+    value = entry.fields.get("keywords", "")
+    if not value:
+        return []
+    # Better BibTeX uses comma or semicolon as separator
+    parts = re.split(r"[,;]+", value)
+    result = []
+    seen = set()
+    for part in parts:
+        cleaned = part.strip()
+        if cleaned and cleaned.lower() not in seen:
+            seen.add(cleaned.lower())
+            result.append(cleaned)
+    return result

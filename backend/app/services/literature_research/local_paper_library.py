@@ -55,16 +55,24 @@ from app.schemas.literature_research.local_library import (
     LocalPaperRead,
     LocalPaperSearchRequest,
     LocalPaperSearchResponse,
+    QueryInterpretation,
 )
 from app.services.literature_research.local_paper_reranker import (
     BGERerankerV2M3HTTP,
     LocalPaperReranker,
 )
 from app.services.literature_research.local_paper_bibtex_catalog import (
+    BibEntry,
     authors as _authors,
+    keywords as _keywords,
     normalize_doi as _doi,
     parse_bibtex,
     publication_year as _year,
+    venue as _venue,
+)
+from app.services.literature_research.local_paper_query_parser import (
+    LocalPaperQueryParser,
+    ParsedQuery,
 )
 from app.services.literature_research.local_paper_source_matcher import (
     SUPPORTED_SUFFIXES,
@@ -1853,9 +1861,15 @@ class LocalPaperLibraryService:
                             paper.title = entry.fields.get("title", paper.title)
                             paper.authors_json = _authors(entry.fields.get("author", ""))
                             paper.doi = doi
-                            paper.publication_year = _year(entry.fields.get("year"))
+                            paper.publication_year = _year(entry.fields.get("year"), entry.fields.get("date"))
+                            paper.venue = _venue(entry)
+                            paper.keywords_json = _keywords(entry)
                             paper.bibtex_type = entry.entry_type
                             paper.bibtex_entry = entry.raw
+                            # DEPRECATED: Do not populate abstract/intro/conclusion text fields
+                            paper.abstract_text = None
+                            paper.introduction_text = None
+                            paper.conclusion_text = None
                             seen_ids.add(paper.id)
                             summary["unchanged"] += 1
                             continue
@@ -1893,7 +1907,9 @@ class LocalPaperLibraryService:
                             doi=doi,
                             title=entry.fields.get("title", entry.citekey),
                             authors_json=_authors(entry.fields.get("author", "")),
-                            publication_year=_year(entry.fields.get("year")),
+                            publication_year=_year(entry.fields.get("year"), entry.fields.get("date")),
+                            venue=_venue(entry),
+                            keywords_json=_keywords(entry),
                             bibtex_type=entry.entry_type,
                             relative_source_path=relative,
                             source_kind=SUPPORTED_SUFFIXES[source.suffix.lower()],
@@ -1903,9 +1919,10 @@ class LocalPaperLibraryService:
                             status="INDEXED",
                             page_count=len(pages),
                             text_characters=sum(len(text) for _, text in pages),
-                            abstract_text=sections["abstract_text"],
-                            introduction_text=sections["introduction_text"],
-                            conclusion_text=sections["conclusion_text"],
+                            # DEPRECATED: Use LocalPaperSection with section_type instead
+                            abstract_text=None,
+                            introduction_text=None,
+                            conclusion_text=None,
                         )
                         self.db.add(paper)
                         await self.db.flush()
@@ -1916,8 +1933,10 @@ class LocalPaperLibraryService:
                         paper.doi, paper.title = doi, entry.fields.get("title", entry.citekey)
                         paper.authors_json, paper.publication_year = (
                             _authors(entry.fields.get("author", "")),
-                            _year(entry.fields.get("year")),
+                            _year(entry.fields.get("year"), entry.fields.get("date")),
                         )
+                        paper.venue = _venue(entry)
+                        paper.keywords_json = _keywords(entry)
                         paper.bibtex_type, paper.relative_source_path = entry.entry_type, relative
                         paper.source_kind, paper.source_sha256, paper.bibtex_entry = (
                             SUPPORTED_SUFFIXES[source.suffix.lower()],
@@ -1927,9 +1946,10 @@ class LocalPaperLibraryService:
                         paper.ingestion_version = _local_index_version()
                         paper.status, paper.page_count = "INDEXED", len(pages)
                         paper.text_characters = sum(len(text) for _, text in pages)
-                        paper.abstract_text = sections["abstract_text"]
-                        paper.introduction_text = sections["introduction_text"]
-                        paper.conclusion_text = sections["conclusion_text"]
+                        # DEPRECATED: Use LocalPaperSection with section_type instead
+                        paper.abstract_text = None
+                        paper.introduction_text = None
+                        paper.conclusion_text = None
                     version = await self.db.scalar(
                         select(LocalPaperDocumentVersion).where(
                             LocalPaperDocumentVersion.paper_id == paper.id,
@@ -2290,14 +2310,40 @@ class LocalPaperLibraryService:
     async def search(
         self, *, owner_id: UUID, request: LocalPaperSearchRequest
     ) -> LocalPaperSearchResponse:
-        # 阻止无条件查全库：必须提供 query 或至少一个元数据过滤器
+        """Search local papers with automatic query parsing and metadata filtering."""
+        # Parse natural language query and merge with explicit filters
+        parser = LocalPaperQueryParser()
+        parsed = parser.parse(
+            query=request.query,
+            author=request.author,
+            doi=request.doi,
+            bibtex_type=request.bibtex_type,
+            year_from=request.year_from,
+            year_to=request.year_to,
+        )
+
+        # Validate effective filters
+        if parsed.warnings:
+            for warning in parsed.warnings:
+                if "year_from" in warning and "year_to" in warning and ">" in warning:
+                    # Invalid year range - return validation error via empty result with warning
+                    return LocalPaperSearchResponse(
+                        items=[],
+                        total=0,
+                        retrieval_mode="metadata",
+                        query_interpretation=QueryInterpretation(
+                            raw_query=parsed.raw_query,
+                            semantic_query=parsed.semantic_query,
+                            effective_filters=parsed.effective_filters,
+                            filter_sources=parsed.filter_sources,
+                            warnings=parsed.warnings,
+                        ),
+                    )
+
+        # Check if any filter is provided
         has_filter = bool(
-            request.query.strip()
-            or request.author
-            or request.doi
-            or request.bibtex_type
-            or request.year_from
-            or request.year_to
+            parsed.semantic_query.strip()
+            or parsed.effective_filters
             or request.paper_ids
         )
         if not has_filter:
@@ -2307,22 +2353,46 @@ class LocalPaperLibraryService:
         statement = select(LocalPaper).where(
             LocalPaper.library_id == library.id, LocalPaper.status == "INDEXED"
         )
+
+        # Apply filters from parsed query
         if request.paper_ids:
             statement = statement.where(LocalPaper.id.in_(request.paper_ids))
-        if request.author:
+
+        author_filter = parsed.effective_filters.get("author")
+        if author_filter:
             statement = statement.where(
-                cast(LocalPaper.authors_json, Text).ilike(f"%{request.author}%")
+                cast(LocalPaper.authors_json, Text).ilike(f"%{author_filter}%")
             )
-        if request.doi:
+
+        doi_filter = parsed.effective_filters.get("doi")
+        if doi_filter:
             statement = statement.where(
-                LocalPaper.doi.ilike(f"%{_doi(request.doi) or request.doi}%")
+                LocalPaper.doi.ilike(f"%{_doi(doi_filter) or doi_filter}%")
             )
-        if request.bibtex_type:
-            statement = statement.where(LocalPaper.bibtex_type == request.bibtex_type.lower())
-        if request.year_from:
-            statement = statement.where(LocalPaper.publication_year >= request.year_from)
-        if request.year_to:
-            statement = statement.where(LocalPaper.publication_year <= request.year_to)
+
+        bibtex_type_filter = parsed.effective_filters.get("bibtex_type")
+        if bibtex_type_filter:
+            statement = statement.where(LocalPaper.bibtex_type == bibtex_type_filter.lower())
+
+        year_from_filter = parsed.effective_filters.get("year_from")
+        if year_from_filter:
+            statement = statement.where(LocalPaper.publication_year >= year_from_filter)
+
+        year_to_filter = parsed.effective_filters.get("year_to")
+        if year_to_filter:
+            statement = statement.where(LocalPaper.publication_year <= year_to_filter)
+
+        venue_filter = request.venue
+        if venue_filter:
+            statement = statement.where(LocalPaper.venue.ilike(f"%{venue_filter}%"))
+
+        keywords_filter = request.keywords
+        if keywords_filter:
+            # Match any of the provided keywords
+            statement = statement.where(
+                cast(LocalPaper.keywords_json, Text).ilike(f"%{keywords_filter[0]}%")
+            )
+
         candidates = (await self.db.scalars(statement)).all()
         allowed = {paper.id: paper for paper in candidates}
         evidence: dict[UUID, list[LocalPaperEvidenceRead]] = {}
@@ -2330,7 +2400,10 @@ class LocalPaperLibraryService:
         rerank_candidates: list[RetrievalChunk] = []
         eligible_candidates: list[RetrievalChunk] = []
         retrieval_run: LocalPaperRetrievalRun | None = None
-        if request.query.strip() and allowed:
+
+        # Use cleaned semantic query for vector/BM25 search
+        semantic_query = parsed.semantic_query
+        if semantic_query.strip() and allowed:
             active_versions = {
                 paper.active_document_version_id
                 for paper in candidates
@@ -2367,7 +2440,7 @@ class LocalPaperLibraryService:
                     if row.lexical_terms
                 ]
                 corpus = _BM25CorpusCache.put(scope_key, _BM25Corpus(corpus_ids, BM25Okapi(corpus_tokens))) if corpus_tokens else None
-            query_tokens = _bm25_tokens(request.query)
+            query_tokens = _bm25_tokens(semantic_query)
             bm25_scored: list[tuple[UUID, float]] = []
             if corpus is not None and query_tokens:
                 scores = corpus.model.get_scores(query_tokens)
@@ -2382,7 +2455,7 @@ class LocalPaperLibraryService:
             # because it failed metadata constraints.
             points = await self.index.search(
                 collection=library.qdrant_collection,
-                query=request.query,
+                query=semantic_query,
                 limit=settings.LOCAL_PAPER_DENSE_CANDIDATE_LIMIT,
                 paper_ids=list(allowed),
                 document_version_ids=list(active_versions),
@@ -2405,7 +2478,18 @@ class LocalPaperLibraryService:
             fused = _rrf_fuse(dense_scored, bm25_scored, rrf_k=settings.LOCAL_PAPER_RRF_K)
             fused_ids = list(fused)
             if not fused_ids:
-                return LocalPaperSearchResponse(items=[], total=0, retrieval_mode="hybrid")
+                return LocalPaperSearchResponse(
+                    items=[],
+                    total=0,
+                    retrieval_mode="hybrid",
+                    query_interpretation=QueryInterpretation(
+                        raw_query=parsed.raw_query,
+                        semantic_query=parsed.semantic_query,
+                        effective_filters=parsed.effective_filters,
+                        filter_sources=parsed.filter_sources,
+                        warnings=parsed.warnings,
+                    ),
+                )
             rows = (
                 await self.db.execute(
                     select(LocalPaperChunk, LocalPaperSection)
@@ -2452,7 +2536,7 @@ class LocalPaperLibraryService:
                 max_per_paper=settings.LOCAL_PAPER_MAX_RERANK_CHUNKS_PER_PAPER,
             )
             rerank_scores = await self.reranker.score(
-                query=request.query,
+                query=semantic_query,
                 documents=[item.reranker_text for item in rerank_candidates],
             )
             if len(rerank_scores) != len(rerank_candidates):
@@ -2511,10 +2595,15 @@ class LocalPaperLibraryService:
                             rerank_score=item.rerank_score,
                             mmr_score=item.mmr_score,
                             section_heading=item.parent.heading,
+                            section_type=item.parent.section_type,
                             paragraph_index=item.chunk.paragraph_index,
                             bbox=item.chunk.bbox_json,
                             figure_id=item.chunk.figure_id,
                             parent_text=item.parent.content,
+                            # Full lineage for evidence traceability
+                            chunk_id=item.chunk.id,
+                            section_id=item.parent.id,
+                            document_version_id=item.chunk.document_version_id,
                         )
                     )
             mode = "hybrid"
@@ -2557,7 +2646,7 @@ class LocalPaperLibraryService:
                 for item in eligible_candidates
             ],
         }
-        if request.query.strip() and allowed:
+        if semantic_query.strip() and allowed:
             retrieval_run = LocalPaperRetrievalRun(
                 library_id=library.id,
                 owner_id=owner_id,
@@ -2578,19 +2667,26 @@ class LocalPaperLibraryService:
             ],
             total=len(result_items),  # 返回实际数量，不是全部匹配数
             retrieval_mode=mode,
-            candidate_chunks=len(rerank_candidates) if request.query.strip() and allowed else 0,
+            candidate_chunks=len(rerank_candidates) if semantic_query.strip() and allowed else 0,
             candidate_papers=(
                 len({item.chunk.paper_id for item in rerank_candidates})
-                if request.query.strip() and allowed
+                if semantic_query.strip() and allowed
                 else len(ordered)
             ),
             rejected_by_score=(
                 len(rerank_candidates) - len(eligible_candidates)
-                if request.query.strip() and allowed
+                if semantic_query.strip() and allowed
                 else 0
             ),
-            insufficient_evidence=bool(request.query.strip() and allowed and not result_items),
+            insufficient_evidence=bool(semantic_query.strip() and allowed and not result_items),
             retrieval_run_id=retrieval_run.id if retrieval_run else None,
+            query_interpretation=QueryInterpretation(
+                raw_query=parsed.raw_query,
+                semantic_query=parsed.semantic_query,
+                effective_filters=parsed.effective_filters,
+                filter_sources=parsed.filter_sources,
+                warnings=parsed.warnings,
+            ),
             trace=trace,
         )
 
@@ -2799,8 +2895,11 @@ class LocalPaperLibraryService:
             bibtex_type=paper.bibtex_type,
             source_kind=paper.source_kind,
             relative_source_path=paper.relative_source_path,
+            venue=paper.venue,
+            keywords=paper.keywords_json,
             evidence=list(evidence),
-            abstract_text=paper.abstract_text,
-            introduction_text=paper.introduction_text,
-            conclusion_text=paper.conclusion_text,
+            # DEPRECATED: Always return None for deprecated fields
+            abstract_text=None,
+            introduction_text=None,
+            conclusion_text=None,
         )

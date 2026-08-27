@@ -16,10 +16,14 @@ from app.core.config import settings
 from app.db.models.local_paper_analysis import LocalPaperAnalysisJob, LocalPaperAnalysisStage
 from app.schemas.literature_research.local_library import (
     LocalPaperAnalysisCreate,
-    LocalPaperRead,
     LocalPaperSearchRequest,
 )
+from app.services.literature_research.local_paper_evidence import (
+    LocalPaperEvidenceRetriever,
+    PaperEvidenceResult,
+)
 from app.services.literature_research.local_paper_library import LocalPaperLibraryService
+from app.services.literature_research.local_paper_retrieval import LocalPaperChunkRetriever
 from app.services.literature_research.object_store import get_research_object_store
 from app.services.literature_research.paper_analysis_model_gateway import (
     ModelGatewayError,
@@ -40,24 +44,69 @@ class PaperEvidenceService:
     """Build a bounded per-paper evidence packet; no full prompt is logged."""
 
     @staticmethod
-    def payload(paper: LocalPaperRead) -> dict[str, object]:
-        return paper.model_dump(mode="json")
+    def payload(paper_result: "PaperEvidenceResult") -> dict[str, object]:
+        """Create evidence payload from retrieval result."""
+        return {
+            "paper_id": str(paper_result.paper_id),
+            "paper_title": paper_result.paper_title,
+            "evidence": [
+                {
+                    "section_type": ev.section_type,
+                    "section_heading": ev.section_heading,
+                    "page_number": ev.page_number,
+                    "child_text": ev.child_text,
+                    "context_text": ev.context_text,
+                    "rerank_score": ev.rerank_score,
+                    "chunk_id": str(ev.chunk_id),
+                    "section_id": str(ev.section_id),
+                }
+                for ev in paper_result.evidence
+            ],
+            "insufficient_evidence": paper_result.insufficient_evidence,
+            "queries_used": paper_result.queries_used,
+        }
 
     @staticmethod
-    def prompt(paper: LocalPaperRead, question: str) -> tuple[str, str]:
-        sections = []
-        for label, value in (("摘要", paper.abstract_text), ("引言", paper.introduction_text), ("结论", paper.conclusion_text)):
-            if value:
-                sections.append(f"{label}：{value[:700]}")
-        for evidence in paper.evidence[:3]:
-            text = (evidence.parent_text or evidence.text)[:550]
-            sections.append(f"[p.{evidence.page_number}] {text}")
+    def prompt(evidence_payload: dict[str, object], question: str) -> tuple[str, str]:
+        """Build analysis prompt from evidence payload.
+
+        Uses section-based evidence with context around child chunks.
+        No truncated parent prefix, no deprecated abstract/intro/conclusion fields.
+        """
+        paper_title = evidence_payload.get("paper_title", "未命名论文")
+        evidence_items = evidence_payload.get("evidence", [])
+
+        if not evidence_items:
+            # No evidence available
+            system = (
+                "你是严谨的学术分析助手。当本地论文证据不足时，"
+                "明确说明[摘录不足]，不编造内容。"
+            )
+            user = f"研究问题：{question}\n\n论文：{paper_title}\n\n证据：无可用证据"
+            return system, user
+
+        # Build evidence sections with handles [E1], [E2], etc.
+        evidence_blocks = []
+        for idx, ev in enumerate(evidence_items, 1):
+            section_type = ev.get("section_type", "BODY")
+            section_heading = ev.get("section_heading", "正文")
+            page = ev.get("page_number", "?")
+            context = ev.get("context_text", "")[:800]  # Cap context, not arbitrary parent prefix
+
+            evidence_blocks.append(
+                f"[E{idx}] {section_type} - {section_heading} (p.{page})\n{context}"
+            )
+
         system = (
             "你是严谨的学术分析助手。只能依据给定本地论文页码证据作答；"
             "缺失信息标记为[摘录不足]。用中文输出：研究问题、创新点、方法、结果/局限，"
-            "每项附 p.N 证据，不超过 8 个要点。"
+            "每项附证据句柄 [E1]、[E2] 等，不超过 8 个要点。"
         )
-        user = f"研究问题：{question}\n\n论文：{paper.title}\n\n证据：\n" + "\n\n".join(sections)
+        user = (
+            f"研究问题：{question}\n\n"
+            f"论文：{paper_title}\n\n"
+            f"证据：\n" + "\n\n".join(evidence_blocks)
+        )
         return system, user
 
 
@@ -122,31 +171,123 @@ class LocalPaperAnalysisOrchestrator:
             await self._run_staged(job)
 
     async def _prepare(self, job: LocalPaperAnalysisJob) -> None:
+        """Prepare analysis stages with evidence retrieval.
+
+        If paper_ids provided: strict load and independent evidence retrieval per paper
+        If not: discovery search first, then evidence retrieval
+        """
         exists = await self.db.scalar(select(LocalPaperAnalysisStage.id).where(LocalPaperAnalysisStage.job_id == job.id).limit(1))
         if exists is not None:
             return
         await self.service._progress(job, "RETRIEVING", "RETRIEVING", {"execution_mode": job.execution_mode})
         request = LocalPaperAnalysisCreate.model_validate(job.request_json)
-        search = await LocalPaperLibraryService(self.db).search(
-            owner_id=job.owner_id,
-            request=LocalPaperSearchRequest(query=request.query or request.question, paper_ids=request.paper_ids, limit=request.limit),
+
+        # Step 1: Determine which papers to analyze
+        if request.paper_ids:
+            # User-selected papers: strict load by owner/library/INDEXED/active version
+            from sqlalchemy import select as sql_select
+            from app.db.models.local_paper_library import LocalPaper, LocalPaperLibrary
+
+            library = await self.db.scalar(
+                sql_select(LocalPaperLibrary).where(LocalPaperLibrary.owner_id == job.owner_id)
+            )
+            if not library:
+                await self._fail(job, "LIBRARY_NOT_FOUND", "本地论文库未初始化")
+                return
+
+            papers = (
+                await self.db.execute(
+                    sql_select(LocalPaper)
+                    .where(
+                        LocalPaper.id.in_(request.paper_ids),
+                        LocalPaper.library_id == library.id,
+                        LocalPaper.status == "INDEXED",
+                        LocalPaper.active_document_version_id.isnot(None),
+                    )
+                )
+            ).scalars().all()
+
+            # Preserve user-selected order
+            paper_map = {p.id: p for p in papers}
+            selected_papers = [paper_map[pid] for pid in request.paper_ids if pid in paper_map]
+
+            if not selected_papers:
+                await self._fail(job, "NO_VALID_PAPERS", "所选论文均不可用（未索引或无活动版本）")
+                return
+
+            collection = library.qdrant_collection
+        else:
+            # Discovery: use query to find papers
+            library_service = LocalPaperLibraryService(self.db)
+            search = await library_service.search(
+                owner_id=job.owner_id,
+                request=LocalPaperSearchRequest(
+                    query=request.query or request.question,
+                    limit=request.limit,
+                ),
+            )
+            selected_papers = [
+                await self.db.get(LocalPaper, item.id)
+                for item in search.items
+            ]
+            selected_papers = [p for p in selected_papers if p is not None]
+
+            if not selected_papers:
+                await self._fail(job, "NO_PAPERS_FOUND", "未找到匹配的论文")
+                return
+
+            library = await self.db.scalar(
+                sql_select(LocalPaperLibrary).where(LocalPaperLibrary.owner_id == job.owner_id)
+            )
+            collection = library.qdrant_collection if library else ""
+
+        # Step 2: Retrieve evidence for each paper using the evidence retriever
+        # Need to instantiate chunk retriever and evidence retriever
+        from app.services.literature_research.local_paper_vector_index import LocalPaperVectorIndex
+        from app.services.literature_research.local_paper_reranker import BGERerankerV2M3HTTP
+
+        vector_index = LocalPaperVectorIndex()
+        reranker = BGERerankerV2M3HTTP()
+        chunk_retriever = LocalPaperChunkRetriever(self.db, vector_index, reranker)
+        evidence_retriever = LocalPaperEvidenceRetriever(self.db, chunk_retriever)
+
+        paper_ids = [p.id for p in selected_papers]
+        evidence_results = await evidence_retriever.retrieve_for_papers(
+            paper_ids=paper_ids,
+            question=request.question,
+            query_context=request.query,
+            collection=collection,
         )
-        job.retrieval_run_id = search.retrieval_run_id
-        job.source_versions_json = await self.service._source_versions(search.items)
-        job.evidence_json = self.service._evidence_manifest(search.items)
-        job.stage_total = len(search.items) + 1
+
+        # Step 3: Create stages with evidence
+        job.retrieval_run_id = None  # Could link to a retrieval run if needed
+        job.source_versions_json = {
+            str(p.id): str(p.active_document_version_id)
+            for p in selected_papers
+            if p.active_document_version_id
+        }
+        job.evidence_json = {
+            "paper_count": len(selected_papers),
+            "papers": [
+                {"id": str(p.id), "title": p.title, "citekey": p.citekey}
+                for p in selected_papers
+            ],
+        }
+        job.stage_total = len(selected_papers) + 1
         job.stage_index = 0
         job.stage = "EVIDENCE_READY"
-        for index, paper in enumerate(search.items, start=1):
-            payload = PaperEvidenceService.payload(paper)
+
+        for index, evidence_result in enumerate(evidence_results, start=1):
+            payload = PaperEvidenceService.payload(evidence_result)
             self.db.add(LocalPaperAnalysisStage(
                 job_id=job.id,
-                paper_id=paper.id,
+                paper_id=evidence_result.paper_id,
                 stage_type=PAPER_STAGE,
                 stage_index=index,
                 input_sha256=hashlib.sha256(_canonical(payload).encode()).hexdigest(),
-                evidence_json={"paper": payload},
+                evidence_json=payload,
             ))
+
         self.db.add(LocalPaperAnalysisStage(
             job_id=job.id,
             paper_id=None,
@@ -155,7 +296,7 @@ class LocalPaperAnalysisOrchestrator:
             status="BLOCKED",
             input_sha256=hashlib.sha256(job.question.encode()).hexdigest(),
         ))
-        await self.service._progress(job, "ANALYZING", "EVIDENCE_READY", {"paper_count": len(search.items), "stage_total": job.stage_total})
+        await self.service._progress(job, "ANALYZING", "EVIDENCE_READY", {"paper_count": len(selected_papers), "stage_total": job.stage_total})
 
     async def _run_staged(self, job: LocalPaperAnalysisJob) -> None:
         while True:
@@ -185,10 +326,14 @@ class LocalPaperAnalysisOrchestrator:
         return claimed
 
     async def _complete_paper(self, stage: LocalPaperAnalysisStage, job: LocalPaperAnalysisJob) -> str:
-        payload = stage.evidence_json.get("paper")
-        paper = LocalPaperRead.model_validate(payload)
-        system, user = PaperEvidenceService.prompt(paper, job.question)
-        result = await self.gateway.complete(system_prompt=system, user_prompt=user, max_output_tokens=settings.LOCAL_PAPER_ANALYSIS_PAPER_MAX_OUTPUT_TOKENS)
+        """Complete analysis for one paper using evidence payload."""
+        evidence_payload = stage.evidence_json
+        system, user = PaperEvidenceService.prompt(evidence_payload, job.question)
+        result = await self.gateway.complete(
+            system_prompt=system,
+            user_prompt=user,
+            max_output_tokens=settings.LOCAL_PAPER_ANALYSIS_PAPER_MAX_OUTPUT_TOKENS,
+        )
         return result.content
 
     async def _store_stage_result(self, job: LocalPaperAnalysisJob, stage: LocalPaperAnalysisStage, result: object) -> None:

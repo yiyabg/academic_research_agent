@@ -49,6 +49,21 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "academic_research_agent"
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def normalize_legacy_debug_mode(cls, value: object) -> object:
+        """Accept the common shell value ``DEBUG=release`` as ``false``.
+
+        Some developer shells export a release label through ``DEBUG``.  The
+        setting itself is boolean, and rejecting that value blocks every CLI
+        command before it can report a useful operational error.  Preserve
+        strict Pydantic parsing for all other values.
+        """
+        if isinstance(value, str) and value.casefold() in {"release", "production", "prod"}:
+            return False
+        return value
+
     DB_ECHO: bool = (
         False  # Set DB_ECHO=true to log SQL queries (latency + log-noise drain by default)
     )
