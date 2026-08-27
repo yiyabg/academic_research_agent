@@ -28,7 +28,7 @@ import {
   Textarea,
 } from "@/components/ui";
 import { literatureResearchApi } from "@/lib/literature-research-api";
-import { createClientId } from "@/lib/client-id";
+import { createClientId, createUuid } from "@/lib/client-id";
 import { ROUTES } from "@/lib/constants";
 import type {
   ResearchExecutionMode,
@@ -73,7 +73,7 @@ export default function NewResearchPage() {
     const existing = window.localStorage.getItem(RESEARCH_DRAFT_SESSION_KEY);
     // The L1 API is deliberately UUID-keyed.  Replace the old human-readable
     // client id once so existing browsers stop issuing a permanent 422.
-    const id = existing && UUID_RE.test(existing) ? existing : crypto.randomUUID();
+    const id = existing && UUID_RE.test(existing) ? existing : createUuid();
     if (id !== existing) window.localStorage.setItem(RESEARCH_DRAFT_SESSION_KEY, id);
     setSessionId(id);
   }, []);

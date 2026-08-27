@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import subprocess
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -25,6 +25,7 @@ import httpx
 import redis.asyncio as aioredis
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from rank_bm25 import BM25Okapi
 from sqlalchemy import Text, cast, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,14 +60,30 @@ from app.services.literature_research.local_paper_reranker import (
     BGERerankerV2M3HTTP,
     LocalPaperReranker,
 )
+from app.services.literature_research.local_paper_bibtex_catalog import (
+    authors as _authors,
+    normalize_doi as _doi,
+    parse_bibtex,
+    publication_year as _year,
+)
+from app.services.literature_research.local_paper_source_matcher import (
+    SUPPORTED_SUFFIXES,
+    attachment_paths,
+    relative_source as _relative,
+    safe_source as _safe_source,
+    sha256_file as _sha256,
+)
+from app.services.literature_research.local_paper_grounded_qa import (
+    GroundedAnswer,
+    GroundedClaim,
+    render_grounded_answer as _render_grounded_answer,
+)
 from app.services.literature_research.local_paper_vector_index import (
     LocalPaperVectorChunk,
     LocalPaperVectorIndex,
 )
 from app.services.llm_provider import build_llm_model, llm_is_configured
 
-SUPPORTED_SUFFIXES = {".pdf": "pdf", ".html": "html", ".htm": "html"}
-_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.I)
 _HEADING_NUMBER = re.compile(
     r"^(?:(?:[IVXLC]+|\d+(?:\.\d+){0,4})[.)]?)\s+|(?:abstract|introduction|conclusion|references|"
     r"methods?|results?|discussion|acknowledg(?:e)?ments?|摘要|引言|结论|参考文献)\b",
@@ -89,14 +106,6 @@ def _strip_null(text: str) -> str:
     processable.  NUL is removed because PostgreSQL text values reject it.
     """
     return _UTF16_SURROGATE.sub("\ufffd", text.replace("\x00", ""))
-
-
-@dataclass(frozen=True)
-class BibEntry:
-    entry_type: str
-    citekey: str
-    fields: dict[str, str]
-    raw: str
 
 
 class _SafeHTMLText(HTMLParser):
@@ -131,161 +140,6 @@ class _SafeHTMLText(HTMLParser):
 
     def text(self) -> str:
         return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+", " ", "".join(self.parts))).strip()
-
-
-def _read_balanced(text: str, start: int, opening: str, closing: str) -> tuple[str, int]:
-    if opening == closing:
-        index = start + 1
-        escaped = False
-        while index < len(text):
-            char = text[index]
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == opening:
-                return text[start + 1 : index], index + 1
-            index += 1
-        raise ValueError("Unclosed quoted BibTeX value")
-    depth, escaped, index = 0, False, start
-    while index < len(text):
-        char = text[index]
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-            if depth == 0:
-                return text[start + 1 : index], index + 1
-        index += 1
-    raise ValueError("Unclosed BibTeX value")
-
-
-def parse_bibtex(payload: str) -> list[BibEntry]:
-    """Small brace-aware parser for Better BibTeX exports (no code evaluation)."""
-    entries: list[BibEntry] = []
-    position = 0
-    header = re.compile(r"@(\w+)\s*([\{\(])\s*([^,\s]+)\s*,", re.M)
-    while match := header.search(payload, position):
-        entry_type, opener, citekey = match.group(1).lower(), match.group(2), match.group(3)
-        closer = "}" if opener == "{" else ")"
-        try:
-            body, end = _read_balanced(payload, match.start(2), opener, closer)
-        except ValueError:
-            break
-        # body begins with citekey; field parsing starts after its first comma.
-        fields: dict[str, str] = {}
-        index = body.find(",") + 1
-        field_pattern = re.compile(r"\s*([\w-]+)\s*=\s*", re.M)
-        while index > 0 and index < len(body):
-            field = field_pattern.match(body, index)
-            if not field:
-                index += 1
-                continue
-            key, index = field.group(1).lower(), field.end()
-            while index < len(body) and body[index].isspace():
-                index += 1
-            if index >= len(body):
-                break
-            try:
-                if body[index] == "{":
-                    value, index = _read_balanced(body, index, "{", "}")
-                elif body[index] == '"':
-                    value, index = _read_balanced(body, index, '"', '"')
-                else:
-                    value_end = body.find(",", index)
-                    if value_end < 0:
-                        value_end = len(body)
-                    value, index = body[index:value_end], value_end
-            except ValueError:
-                break
-            fields[key] = re.sub(r"\s+", " ", value).strip()
-            comma = body.find(",", index)
-            index = len(body) if comma < 0 else comma + 1
-        entries.append(BibEntry(entry_type, citekey, fields, payload[match.start() : end]))
-        position = end
-    return entries
-
-
-def _relative(root: Path, path: Path) -> str:
-    return path.resolve().relative_to(root.resolve()).as_posix()
-
-
-def _safe_source(root: Path, candidate: str) -> Path | None:
-    candidate = candidate.replace("\\", "/").strip().lstrip("/")
-    if not candidate or ".." in Path(candidate).parts:
-        return None
-    path = (root / candidate).resolve()
-    try:
-        path.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return path if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES else None
-
-
-def attachment_paths(entry: BibEntry) -> list[str]:
-    """Extract attachment file paths from Better BibTeX file field.
-
-    Handles multiple formats:
-    - Label:path:application/pdf
-    - :path:application/pdf  (no label)
-    - path  (bare path, some Zotero versions)
-    - Label:path:PDF  (non-standard MIME)
-    """
-    value = entry.fields.get("file", "")
-    if not value:
-        return []
-
-    paths: list[str] = []
-
-    # Format 1: Better BibTeX standard: [Label:]path:mime[;...]
-    # Matches paths ending in .pdf or .html with optional label prefix and mime suffix
-    for segment in re.split(r"(?<!\\);", value):
-        segment = segment.strip()
-        if not segment:
-            continue
-        parts = segment.split(":")
-        # Try all "middle" sections as path candidates
-        for _i, part in enumerate(parts):
-            part = part.strip()
-            if re.search(r"\.(pdf|html?)$", part, re.I) and part:
-                paths.append(part)
-
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    result: list[str] = []
-    for p in paths:
-        if p not in seen:
-            seen.add(p)
-            result.append(p)
-    return result
-
-
-def _authors(value: str) -> list[str]:
-    return [part.strip() for part in re.split(r"\s+and\s+", value, flags=re.I) if part.strip()]
-
-
-def _doi(value: str | None) -> str | None:
-    if not value:
-        return None
-    cleaned = _DOI_PREFIX.sub("", value.strip()).rstrip("/ .")
-    return cleaned.lower() or None
-
-
-def _year(value: str | None) -> int | None:
-    match = re.search(r"\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b", value or "")
-    return int(match.group(1)) if match else None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for part in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(part)
-    return digest.hexdigest()
 
 
 def _local_index_version() -> str:
@@ -1356,6 +1210,44 @@ def _bm25_tokens(text: str) -> list[str]:
     return raw + bigrams
 
 
+@dataclass(frozen=True)
+class _BM25Corpus:
+    """Immutable, metadata-scope-specific Okapi corpus held only in process memory."""
+
+    chunk_ids: tuple[UUID, ...]
+    model: BM25Okapi
+
+
+class _BM25CorpusCache:
+    """Small LRU cache; PostgreSQL remains the durable source and sync changes the key."""
+
+    max_entries = 16
+    _entries: OrderedDict[str, _BM25Corpus] = OrderedDict()
+
+    @classmethod
+    def get(cls, key: str) -> _BM25Corpus | None:
+        corpus = cls._entries.get(key)
+        if corpus is not None:
+            cls._entries.move_to_end(key)
+        return corpus
+
+    @classmethod
+    def put(cls, key: str, corpus: _BM25Corpus) -> _BM25Corpus:
+        cls._entries[key] = corpus
+        cls._entries.move_to_end(key)
+        while len(cls._entries) > cls.max_entries:
+            cls._entries.popitem(last=False)
+        return corpus
+
+
+def _bm25_scope_key(active_versions: set[UUID], paper_ids: set[UUID]) -> str:
+    # A document version change creates a new key, so sync rebuilds cannot
+    # accidentally reuse an old lexical corpus.
+    return hashlib.sha256(
+        (",".join(sorted(str(version) for version in active_versions)) + "|" + ",".join(sorted(str(paper_id) for paper_id in paper_ids))).encode()
+    ).hexdigest()
+
+
 def _rrf_fuse(
     dense: list[tuple[UUID, float, list[float] | None]],
     bm25: list[tuple[UUID, float]],
@@ -1472,34 +1364,6 @@ def _is_new_evidence(existing: list[LocalPaperEvidenceRead], item: RetrievalChun
         if item.chunk.figure_id is not None and evidence.figure_id == item.chunk.figure_id:
             return False
     return True
-
-
-class GroundedClaim(BaseModel):
-    """A model-generated claim whose citations are validated server-side."""
-
-    text: str = Field(min_length=1, max_length=1600)
-    citation_ids: list[int] = Field(min_length=1, max_length=8)
-
-
-class GroundedAnswer(BaseModel):
-    answer: str = Field(min_length=1, max_length=3000)
-    claims: list[GroundedClaim] = Field(min_length=1, max_length=12)
-    uncertainty: str | None = Field(default=None, max_length=1000)
-
-
-def _render_grounded_answer(result: GroundedAnswer, citation_count: int) -> str | None:
-    """Render only citation IDs from the server-issued evidence registry."""
-    valid_ids = set(range(1, citation_count + 1))
-    if any(not set(claim.citation_ids).issubset(valid_ids) for claim in result.claims):
-        return None
-    lines = ["## 综合回答", result.answer, "", "## 有证据的观点"]
-    lines.extend(
-        f"- {claim.text} {' '.join(f'[{index}]' for index in claim.citation_ids)}"
-        for claim in result.claims
-    )
-    if result.uncertainty:
-        lines.extend(["", "## 不确定性", result.uncertainty])
-    return "\n".join(lines)
 
 
 class LocalPaperLibraryService:
@@ -2482,28 +2346,36 @@ class LocalPaperLibraryService:
                     "本地论文库索引版本已变更，必须先执行“手动同步/增量重建”后再检索。"
                 )
 
-            # PostgreSQL owns lexical recall. ``lexical_terms`` is normalized
-            # with the same English/CJK tokeniser at write time, so this GIN
-            # index remains exact and bounded without copying the corpus into
-            # Python or silently truncating it at an arbitrary row limit.
-            lexical_query = " ".join(_bm25_tokens(request.query))
-            ts_query = func.plainto_tsquery("simple", lexical_query)
-            lexical_rows = (
-                await self.db.execute(
-                    select(
-                        LocalPaperChunk.id,
-                        func.ts_rank_cd(LocalPaperChunk.lexical_tsv, ts_query).label("score"),
+            # ``ts_rank_cd`` is PostgreSQL full-text ranking, not BM25.  Keep
+            # lexical_terms as the durable token store and calculate genuine
+            # Okapi BM25 across the same metadata-filtered corpus.
+            scope_key = _bm25_scope_key(active_versions, set(allowed))
+            corpus = _BM25CorpusCache.get(scope_key)
+            if corpus is None:
+                lexical_rows = (
+                    await self.db.execute(
+                        select(LocalPaperChunk.id, LocalPaperChunk.lexical_terms).where(
+                            LocalPaperChunk.paper_id.in_(list(allowed)),
+                            LocalPaperChunk.document_version_id.in_(list(active_versions)),
+                        )
                     )
-                    .where(
-                        LocalPaperChunk.paper_id.in_(list(allowed)),
-                        LocalPaperChunk.document_version_id.in_(list(active_versions)),
-                        LocalPaperChunk.lexical_tsv.op("@@")(ts_query),
-                    )
-                    .order_by(func.ts_rank_cd(LocalPaperChunk.lexical_tsv, ts_query).desc())
-                    .limit(settings.LOCAL_PAPER_BM25_CANDIDATE_LIMIT)
-                )
-            ).all()
-            bm25_scored = [(row.id, float(row.score)) for row in lexical_rows if row.score > 0]
+                ).all()
+                corpus_ids = tuple(row.id for row in lexical_rows if row.lexical_terms)
+                corpus_tokens = [
+                    _bm25_tokens(str(row.lexical_terms))
+                    for row in lexical_rows
+                    if row.lexical_terms
+                ]
+                corpus = _BM25CorpusCache.put(scope_key, _BM25Corpus(corpus_ids, BM25Okapi(corpus_tokens))) if corpus_tokens else None
+            query_tokens = _bm25_tokens(request.query)
+            bm25_scored: list[tuple[UUID, float]] = []
+            if corpus is not None and query_tokens:
+                scores = corpus.model.get_scores(query_tokens)
+                bm25_scored = sorted(
+                    ((chunk_id, float(score)) for chunk_id, score in zip(corpus.chunk_ids, scores, strict=True) if score > 0),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[: settings.LOCAL_PAPER_BM25_CANDIDATE_LIMIT]
 
             # The same PostgreSQL-eligible paper IDs are passed as a Qdrant
             # payload filter. No finite dense result is later discarded merely

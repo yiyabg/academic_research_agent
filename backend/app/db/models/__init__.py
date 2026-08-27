@@ -29,6 +29,7 @@ from app.db.models.local_paper_library import (
 from app.db.models.local_paper_analysis import (
     LocalPaperAnalysisEvent,
     LocalPaperAnalysisJob,
+    LocalPaperAnalysisStage,
     LocalPaperAnalysisLLMAttempt,
     LocalPaperAnalysisSession,
     LocalPaperAnalysisTurn,
@@ -99,6 +100,7 @@ __all__ = [
     "LocalPaperQuarantineItem",
     "LocalPaperAnalysisSession",
     "LocalPaperAnalysisJob",
+    "LocalPaperAnalysisStage",
     "LocalPaperAnalysisEvent",
     "LocalPaperAnalysisTurn",
     "LocalPaperAnalysisLLMAttempt",

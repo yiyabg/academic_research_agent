@@ -41,8 +41,6 @@ export const literatureResearchApi = {
     apiClient.post<LocalPaperSearchResponse>(`${base}/local-library/search`, body),
   askLocalLibrary: (body: { question: string; limit?: number; paper_ids: string[]; query_context?: string }) =>
     apiClient.post<{ answer: string; generated_by_llm: boolean; citations: Array<{ paper_id: string; citekey: string; title: string; doi?: string | null; authors: string[]; publication_year?: number | null; page_number: number; text: string }> }>(`${base}/local-library/ask`, body),
-  analyzePapersMindmap: (body: Record<string, unknown>) =>
-    apiClient.post<Blob>(`${base}/local-library/mindmap`, body),
   createLocalPaperAnalysis: (body: {
     question: string; query?: string; paper_ids?: string[]; limit?: number;
     mode?: "focused" | "comparative" | "comprehensive";

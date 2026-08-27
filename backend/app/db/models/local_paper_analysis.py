@@ -6,8 +6,9 @@ used to reproduce a report after Redis has expired.
 """
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -65,7 +66,12 @@ class LocalPaperAnalysisJob(Base, TimestampMixin):
         index=True,
     )
     mode: Mapped[str] = mapped_column(String(32), nullable=False, default="FOCUSED")
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="staged")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED", index=True)
+    stage: Mapped[str] = mapped_column(String(48), nullable=False, default="QUEUED")
+    stage_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stage_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     request_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     retrieval_run_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -87,6 +93,41 @@ class LocalPaperAnalysisJob(Base, TimestampMixin):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancellation_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class LocalPaperAnalysisStage(Base, TimestampMixin):
+    """A resumable unit of work: one paper analysis or the final synthesis."""
+
+    __tablename__ = "local_paper_analysis_stages"
+    __table_args__ = (
+        UniqueConstraint("job_id", "stage_type", "stage_index", name="uq_local_paper_analysis_stage"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_analysis_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    paper_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("local_papers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    stage_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    stage_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    result_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    provider_response_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    normalized_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class LocalPaperAnalysisEvent(Base, TimestampMixin):
@@ -146,6 +187,15 @@ class LocalPaperAnalysisLLMAttempt(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    stage_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("local_paper_analysis_stages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    paper_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("local_papers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -153,6 +203,8 @@ class LocalPaperAnalysisLLMAttempt(Base, TimestampMixin):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    endpoint_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
 
 

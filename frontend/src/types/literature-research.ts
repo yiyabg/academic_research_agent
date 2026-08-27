@@ -94,7 +94,12 @@ export interface LocalPaperAnalysisJob {
   owner_id: string;
   project_id?: string | null;
   mode: string;
+  execution_mode: "staged" | "background";
   status: LocalPaperAnalysisStatus;
+  stage: string;
+  stage_index: number;
+  stage_total: number;
+  provider_status?: string | null;
   question: string;
   retrieval_run_id?: string | null;
   result: Record<string, unknown>;

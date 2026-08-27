@@ -6,13 +6,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
 import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.clients.redis import RedisClient
 from app.core.config import settings
@@ -40,21 +41,48 @@ from app.schemas.literature_research.local_library import (
     LocalPaperAnalysisSessionRead,
     LocalPaperMemoryCandidateCreate,
     LocalPaperMemoryCandidateRead,
-    LocalPaperSearchRequest,
 )
 from app.schemas.literature_research.memory import ResearchProfileConfirm, SessionMemoryWrite
 from app.services.literature_research.local_paper_library import LocalPaperLibraryService
 from app.services.literature_research.object_store import get_research_object_store
-from app.services.literature_research.paper_mindmap_service import PaperMindmapService
 from app.services.literature_research.session_memory import ResearchSessionMemoryService
 from app.services.llm_provider import (
-    build_local_paper_analysis_model,
     selected_llm_model_identifier,
     selected_llm_provider,
 )
 
 logger = logging.getLogger(__name__)
 TERMINAL_JOB_STATUSES = {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}
+
+
+def _safe_error_message(code: str | None, message: str | None) -> str | None:
+    """Never return historical proxy payloads through a user-facing read API."""
+    if not message:
+        return None
+    if code == "UPSTREAM_GATEWAY_TIMEOUT" or "524" in message:
+        return "上游模型服务未能在规定时间内完成响应。"
+    if code in {"PROVIDER_UNAVAILABLE", "QUEUE_UNAVAILABLE"}:
+        return "模型分析暂不可用，本地检索证据已保留。"
+    if code == "BACKGROUND_STORAGE_NOT_ALLOWED":
+        return "后台分析未获管理员授权。"
+    # Old jobs may contain provider JSON, host names or exception trace text.
+    suspicious = ("http", "traceback", "error:", "exception", "ray id", "cloudflare")
+    if any(token in message.casefold() for token in suspicious):
+        return "模型分析未完成，本地检索证据已保留。"
+    return message[:500]
+
+
+def _safe_report_content(content: str) -> str:
+    """Redact legacy provider diagnostics from reports returned to users.
+
+    Old metadata fallbacks embedded the complete proxy response in a markdown
+    warning line.  The raw diagnostic remains in restricted audit storage, but
+    neither the inline preview nor the downloaded report may expose it.
+    """
+    warning = re.compile(
+        r"(?im)^>\s*⚠️\s*LLM深度分析不可用.*(?:modelhttperror|cloudflare|status[_ ]?code:\s*524|ray_id).*$(?:\n)?"
+    )
+    return warning.sub("> ⚠️ 模型深度分析未完成；以下仅展示已保留的本地页码证据。\n", content)
 
 
 def _canonical_json(value: object) -> str:
@@ -108,6 +136,8 @@ class LocalPaperAnalysisService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
+    terminal_statuses = TERMINAL_JOB_STATUSES
+
     async def create_session(
         self, *, owner_id: UUID, body: LocalPaperAnalysisSessionCreate
     ) -> LocalPaperAnalysisSession:
@@ -128,6 +158,21 @@ class LocalPaperAnalysisService:
         self, *, owner_id: UUID, body: LocalPaperAnalysisCreate
     ) -> tuple[LocalPaperAnalysisJob, bool]:
         library = await self._owned_library(owner_id)
+        if (
+            settings.LOCAL_PAPER_ANALYSIS_EXECUTION_MODE == "background"
+            and not settings.LOCAL_PAPER_ANALYSIS_ALLOW_EPHEMERAL_PROVIDER_STORAGE
+        ):
+            raise ValueError("BACKGROUND_STORAGE_NOT_ALLOWED")
+        # Serialize submissions for one private library.  Client request IDs
+        # protect retries from one browser, while this lock also protects
+        # double-clicks, stale tabs, and concurrent browser sessions.
+        library = await self.db.scalar(
+            select(LocalPaperLibrary)
+            .where(LocalPaperLibrary.id == library.id)
+            .with_for_update()
+        )
+        if library is None:
+            raise NotFoundError("本地文献库不存在")
         if body.client_request_id:
             existing = await self.db.scalar(
                 select(LocalPaperAnalysisJob).where(
@@ -137,6 +182,26 @@ class LocalPaperAnalysisService:
             )
             if existing is not None:
                 return existing, False
+        normalized_request = body.model_dump(mode="json", exclude_none=True)
+        normalized_request.pop("client_request_id", None)
+        active_jobs = (
+            await self.db.scalars(
+                select(LocalPaperAnalysisJob).where(
+                    LocalPaperAnalysisJob.owner_id == owner_id,
+                    LocalPaperAnalysisJob.library_id == library.id,
+                    LocalPaperAnalysisJob.status.not_in(TERMINAL_JOB_STATUSES),
+                )
+            )
+        ).all()
+        for active_job in active_jobs:
+            active_request = dict(active_job.request_json)
+            active_request.pop("client_request_id", None)
+            if _canonical_json(active_request) == _canonical_json(normalized_request):
+                logger.info(
+                    "Reusing active local-paper analysis job_id=%s instead of duplicate submission",
+                    active_job.id,
+                )
+                return active_job, False
         session = await self._resolve_session(owner_id=owner_id, library=library, body=body)
         job = LocalPaperAnalysisJob(
             session_id=session.id,
@@ -144,13 +209,18 @@ class LocalPaperAnalysisService:
             owner_id=owner_id,
             project_id=session.project_id,
             mode=body.mode.upper(),
+            execution_mode=settings.LOCAL_PAPER_ANALYSIS_EXECUTION_MODE,
             question=body.question,
             request_json=body.model_dump(mode="json", exclude_none=True),
             idempotency_key=body.client_request_id,
         )
         self.db.add(job)
         await self.db.flush()
-        await self._append_event(job, "QUEUED", {"stage": "QUEUED", "mode": job.mode})
+        await self._append_event(
+            job,
+            "QUEUED",
+            {"stage": "QUEUED", "mode": job.mode, "execution_mode": job.execution_mode},
+        )
         return job, True
 
     async def get_job(self, *, job_id: UUID, owner_id: UUID) -> LocalPaperAnalysisJob:
@@ -159,6 +229,32 @@ class LocalPaperAnalysisService:
             raise NotFoundError("分析任务不存在")
         if job.owner_id != owner_id:
             raise AuthorizationError("无权访问该分析任务")
+        safe_error = _safe_error_message(job.error_code, job.error_message)
+        if safe_error != job.error_message:
+            # Do not overwrite the audit row; its raw, access-controlled data
+            # remains in the attempt table while the response model is safe.
+            set_committed_value(job, "error_message", safe_error)
+        # Backfill the read model for reports generated before inline previews
+        # were introduced.  The durable L4 turn remains the source of truth.
+        if job.status in {"COMPLETED", "PARTIAL"} and not job.result_json.get("content_preview"):
+            turn = await self.db.scalar(
+                select(LocalPaperAnalysisTurn).where(LocalPaperAnalysisTurn.job_id == job.id)
+            )
+            if turn is not None and turn.assistant_output:
+                job.result_json = {
+                    **job.result_json,
+                    "content_preview": turn.assistant_output[:200_000],
+                    "content_preview_truncated": len(turn.assistant_output) > 200_000,
+                }
+        preview = job.result_json.get("content_preview")
+        if isinstance(preview, str):
+            safe_preview = _safe_report_content(preview)
+            if safe_preview != preview:
+                set_committed_value(
+                    job,
+                    "result_json",
+                    {**job.result_json, "content_preview": safe_preview},
+                )
         return job
 
     async def get_session(self, *, session_id: UUID, owner_id: UUID) -> LocalPaperAnalysisSession:
@@ -244,19 +340,27 @@ class LocalPaperAnalysisService:
             logger.error("Analysis artifact hash mismatch job_id=%s", job.id)
             raise RuntimeError("分析产物完整性校验失败")
         output_format = str(job.result_json.get("output_format", "markdown"))
-        return content, output_format, digest
+        safe_content = _safe_report_content(content.decode("utf-8", errors="replace")).encode()
+        # Legacy reports can be sanitized at read time without mutating the
+        # auditable object.  The response checksum describes exactly what was
+        # delivered to the browser, not the protected original.
+        return safe_content, output_format, hashlib.sha256(safe_content).hexdigest()
 
     async def run_job(self, *, job_id: UUID) -> None:
         """Execute a job without ever leaving infrastructure failures as RUNNING."""
         try:
-            await self._run_job(job_id=job_id)
+            from app.services.literature_research.local_paper_analysis_orchestrator import (
+                LocalPaperAnalysisOrchestrator,
+            )
+
+            await LocalPaperAnalysisOrchestrator(self).run(job_id)
         except Exception as exc:
             await self.db.rollback()
             job = await self.db.get(LocalPaperAnalysisJob, job_id, with_for_update=True)
             if job is not None and job.status not in TERMINAL_JOB_STATUSES:
                 job.status = "FAILED"
-                job.error_code = type(exc).__name__
-                job.error_message = str(exc)[:2000]
+                job.error_code = "PROVIDER_UNAVAILABLE"
+                job.error_message = "分析任务执行失败，系统已保留本地检索证据。"
                 await self._append_event(
                     job,
                     "FAILED",
@@ -271,168 +375,15 @@ class LocalPaperAnalysisService:
                         detail={"error_code": job.error_code},
                     )
                 )
-            logger.exception("Local paper analysis failed job_id=%s", job_id)
+            logger.exception("Local paper analysis failed job_id=%s error_type=%s", job_id, type(exc).__name__)
             raise
 
-    async def _run_job(self, *, job_id: UUID) -> None:
-        job = await self.db.get(LocalPaperAnalysisJob, job_id, with_for_update=True)
-        if job is None or job.status in TERMINAL_JOB_STATUSES:
-            return
-        if job.cancellation_requested:
-            await self._cancel(job)
-            return
-        await self._progress(job, "RETRIEVING", "RETRIEVING", {})
-        request = LocalPaperAnalysisCreate.model_validate(job.request_json)
-        library_service = LocalPaperLibraryService(self.db)
-        search = await library_service.search(
-            owner_id=job.owner_id,
-            request=LocalPaperSearchRequest(
-                query=request.query or request.question,
-                paper_ids=request.paper_ids,
-                limit=request.limit,
-            ),
+    async def poll_background_stage(self, *, stage_id: UUID) -> None:
+        from app.services.literature_research.local_paper_analysis_orchestrator import (
+            LocalPaperAnalysisOrchestrator,
         )
-        # ``search`` accepts its Pydantic contract; model validation here makes
-        # the persisted request an explicit compatibility boundary.
-        # (A dict was used only to avoid inheriting optional UI-only fields.)
-        job.retrieval_run_id = search.retrieval_run_id
-        job.source_versions_json = await self._source_versions(search.items)
-        job.evidence_json = self._evidence_manifest(search.items)
-        await self._progress(
-            job,
-            "ANALYZING",
-            "EVIDENCE_READY",
-            {
-                "paper_count": len(search.items),
-                "retrieval_run_id": str(search.retrieval_run_id)
-                if search.retrieval_run_id
-                else None,
-            },
-        )
-        if job.cancellation_requested:
-            await self._cancel(job)
-            return
-        await self._progress(job, "SYNTHESIZING", "SYNTHESIZING", {})
-        memory_context = await self._resolved_memory_context(job)
-        question_for_model = self._question_with_confirmed_preferences(
-            job.question, memory_context["presentation"]
-        )
-        started = time.monotonic()
-        analysis = await PaperMindmapService().analyze_detailed(
-            papers=search.items,
-            question=question_for_model,
-            output_format=request.output_format,
-            model=build_local_paper_analysis_model(),
-            timeout_seconds=settings.LOCAL_PAPER_ANALYSIS_PRIMARY_TIMEOUT_SECONDS,
-        )
-        latency_ms = round((time.monotonic() - started) * 1000)
-        await self._record_attempt(
-            job,
-            attempt_number=1,
-            provider=selected_llm_provider(),
-            model=selected_llm_model_identifier(),
-            status="SUCCEEDED" if analysis.generated_by_llm else "FAILED",
-            latency_ms=latency_ms,
-            error_message=analysis.fallback_reason,
-        )
-        # The primary compatible gateway is allowed to fail over only through
-        # the official OpenAI provider, never silently to an unknown endpoint.
-        if (
-            not analysis.generated_by_llm
-            and settings.LOCAL_PAPER_ANALYSIS_ENABLE_OPENAI_FALLBACK
-            and selected_llm_provider() != "openai"
-        ):
-            fallback_started = time.monotonic()
-            try:
-                analysis = await PaperMindmapService().analyze_detailed(
-                    papers=search.items,
-                    question=question_for_model,
-                    output_format=request.output_format,
-                    model=build_local_paper_analysis_model(fallback_to_official_openai=True),
-                    timeout_seconds=settings.LOCAL_PAPER_ANALYSIS_FALLBACK_TIMEOUT_SECONDS,
-                )
-                await self._record_attempt(
-                    job,
-                    attempt_number=2,
-                    provider="openai",
-                    model=settings.LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL,
-                    status="SUCCEEDED" if analysis.generated_by_llm else "FAILED",
-                    latency_ms=round((time.monotonic() - fallback_started) * 1000),
-                    error_message=analysis.fallback_reason,
-                )
-            except Exception as exc:
-                await self._record_attempt(
-                    job,
-                    attempt_number=2,
-                    provider="openai",
-                    model=settings.LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL,
-                    status="FAILED",
-                    latency_ms=round((time.monotonic() - fallback_started) * 1000),
-                    error_message=f"{type(exc).__name__}: {exc}",
-                )
-        if job.cancellation_requested:
-            await self._cancel(job)
-            return
-        await self._progress(job, "RENDERING", "RENDERING", {})
-        payload = analysis.content.encode("utf-8")
-        digest = hashlib.sha256(payload).hexdigest()
-        extension = "opml" if request.output_format == "opml" else "md"
-        key = f"local-library/{job.owner_id}/{job.session_id}/{job.id}/analysis-{digest[:16]}.{extension}"
-        job.artifact_key = await get_research_object_store().put(
-            key,
-            payload,
-            content_type="text/x-opml; charset=utf-8"
-            if extension == "opml"
-            else "text/markdown; charset=utf-8",
-            metadata={"sha256": digest, "job-id": str(job.id)},
-        )
-        job.artifact_sha256 = digest
-        job.result_json = {
-            "output_format": request.output_format,
-            "generated_by_llm": analysis.generated_by_llm,
-            "fallback_reason": analysis.fallback_reason,
-            "paper_count": len(search.items),
-            "evidence_count": len(job.evidence_json),
-            "artifact_sha256": digest,
-            "memory_provenance": memory_context["provenance"],
-        }
-        job.status = "COMPLETED" if analysis.generated_by_llm else "PARTIAL"
-        turn = await self.db.scalar(
-            select(LocalPaperAnalysisTurn).where(LocalPaperAnalysisTurn.job_id == job.id)
-        )
-        if turn is None:
-            turn = LocalPaperAnalysisTurn(
-                session_id=job.session_id,
-                job_id=job.id,
-                user_input=job.question,
-                assistant_output=analysis.content,
-                evidence_manifest_json=job.evidence_json,
-                metadata_json={
-                    "output_format": request.output_format,
-                    "generated_by_llm": analysis.generated_by_llm,
-                },
-            )
-            self.db.add(turn)
-        await self._append_event(
-            job,
-            "COMPLETED" if job.status == "COMPLETED" else "PARTIAL",
-            {
-                "artifact_sha256": digest,
-                "generated_by_llm": analysis.generated_by_llm,
-                "fallback_reason": analysis.fallback_reason,
-            },
-        )
-        await self.db.commit()
-        await self._update_short_term_memory(job)
-        await _publish_event(
-            _event_payload(
-                job,
-                sequence=await self._latest_sequence(job.id),
-                event_type=job.status,
-                detail=job.result_json,
-            )
-        )
-        logger.info("Local paper analysis completed job_id=%s status=%s", job.id, job.status)
+
+        await LocalPaperAnalysisOrchestrator(self).poll_background_stage(stage_id)
 
     async def _resolve_session(
         self, *, owner_id: UUID, library: LocalPaperLibrary, body: LocalPaperAnalysisCreate
@@ -603,27 +554,54 @@ class LocalPaperAnalysisService:
         self,
         job: LocalPaperAnalysisJob,
         *,
-        attempt_number: int,
-        provider: str,
-        model: str,
+        stage: object | None = None,
         status: str,
-        latency_ms: int,
-        error_message: str | None,
+        latency_ms: int | None,
+        error: object | None,
     ) -> None:
+        from app.services.literature_research.paper_analysis_model_gateway import ModelGatewayError
+
+        stage_id = getattr(stage, "id", None)
+        paper_id = getattr(stage, "paper_id", None)
+        attempt_number = int(getattr(stage, "attempt_count", 1))
+        normalized_error_code = error.code if isinstance(error, ModelGatewayError) else None
+        error_summary = error.raw_summary if isinstance(error, ModelGatewayError) else None
         self.db.add(
             LocalPaperAnalysisLLMAttempt(
                 job_id=job.id,
+                stage_id=stage_id,
+                paper_id=paper_id,
                 attempt_number=attempt_number,
-                provider=provider,
-                model=model,
+                provider=selected_llm_provider(),
+                model=selected_llm_model_identifier(),
                 status=status,
                 latency_ms=latency_ms,
-                error_type=error_message.split(":", 1)[0] if error_message else None,
-                error_message=error_message,
+                error_type=normalized_error_code,
+                error_message=error_summary,
+                normalized_error_code=normalized_error_code,
+                endpoint_hash=hashlib.sha256(settings.LLM_BASE_URL.rstrip("/").encode()).hexdigest()[:16],
                 prompt_sha256=hashlib.sha256(job.question.encode()).hexdigest(),
             )
         )
         await self.db.flush()
+
+    async def _persist_turn(self, job: LocalPaperAnalysisJob, content: str) -> None:
+        turn = await self.db.scalar(
+            select(LocalPaperAnalysisTurn).where(LocalPaperAnalysisTurn.job_id == job.id)
+        )
+        if turn is None:
+            self.db.add(
+                LocalPaperAnalysisTurn(
+                    session_id=job.session_id,
+                    job_id=job.id,
+                    user_input=job.question,
+                    assistant_output=content,
+                    evidence_manifest_json=job.evidence_json,
+                    metadata_json={"output_format": job.request_json.get("output_format", "markdown")},
+                )
+            )
+        else:
+            turn.assistant_output = content
 
     async def _resolved_memory_context(self, job: LocalPaperAnalysisJob) -> dict[str, object]:
         """Resolve only confirmed memories; audit records their exact provenance.

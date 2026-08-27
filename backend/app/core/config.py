@@ -196,11 +196,11 @@ class Settings(BaseSettings):
     AI_FRAMEWORK: str = "pydantic_ai"
     LLM_PROVIDER: Literal["openai", "deepseek", "openai_compatible"] = "openai"
     LLM_BASE_URL: str = ""
-    # Local-paper reports are long-running jobs.  A compatible gateway can be
-    # unavailable while the official OpenAI endpoint remains healthy; the
-    # fallback is deliberately opt-in and every attempt is retained in audit.
-    LOCAL_PAPER_ANALYSIS_ENABLE_OPENAI_FALLBACK: bool = True
-    LOCAL_PAPER_ANALYSIS_FALLBACK_MODEL: str = "gpt-5.4"
+    # Local-paper analysis never holds a proxy request open beyond the known
+    # Cloudflare read window.  Background mode is an explicit data-policy
+    # opt-in because the provider must retain the response for polling.
+    LOCAL_PAPER_ANALYSIS_EXECUTION_MODE: Literal["staged", "background"] = "staged"
+    LOCAL_PAPER_ANALYSIS_ALLOW_EPHEMERAL_PROVIDER_STORAGE: bool = False
 
     @model_validator(mode="after")
     def validate_llm_provider_model_pair(self) -> "Settings":
@@ -296,14 +296,23 @@ class Settings(BaseSettings):
     # Scheduled sync stays incremental because the source hash/version gates
     # extraction and embeddings. Operators may still trigger an immediate run.
     LOCAL_PAPER_SYNC_INTERVAL_SECONDS: int = Field(default=300, ge=60, le=86400)
-    # A compatible gateway must not keep an auditable job in SYNTHESIZING for
-    # several minutes through SDK-level retries.  These are hard per-attempt
-    # budgets; a failure yields an evidence-backed PARTIAL report.
-    LOCAL_PAPER_ANALYSIS_PRIMARY_TIMEOUT_SECONDS: float = Field(
-        default=45.0, ge=5.0, le=300.0
+    LOCAL_PAPER_ANALYSIS_STAGE_TIMEOUT_SECONDS: float = Field(default=105.0, ge=5.0, le=119.0)
+    # A worker lost during a bounded model request is recovered from PostgreSQL.
+    # This grace period prevents a healthy request from being reclaimed early.
+    LOCAL_PAPER_ANALYSIS_STAGE_RECOVERY_GRACE_SECONDS: int = Field(default=30, ge=5, le=300)
+    LOCAL_PAPER_ANALYSIS_STAGE_MAX_RETRIES: int = Field(default=1, ge=0, le=3)
+    LOCAL_PAPER_ANALYSIS_MAX_CONCURRENCY: int = Field(default=2, ge=1, le=4)
+    LOCAL_PAPER_ANALYSIS_REASONING_EFFORT: Literal["low", "medium", "high"] = "low"
+    LOCAL_PAPER_ANALYSIS_PAPER_MAX_OUTPUT_TOKENS: int = Field(default=1200, ge=128, le=4096)
+    LOCAL_PAPER_ANALYSIS_SYNTHESIS_MAX_OUTPUT_TOKENS: int = Field(default=1600, ge=128, le=4096)
+    LOCAL_PAPER_ANALYSIS_BACKGROUND_SUBMIT_TIMEOUT_SECONDS: float = Field(
+        default=30.0, ge=5.0, le=119.0
     )
-    LOCAL_PAPER_ANALYSIS_FALLBACK_TIMEOUT_SECONDS: float = Field(
-        default=60.0, ge=5.0, le=300.0
+    LOCAL_PAPER_ANALYSIS_BACKGROUND_POLL_TIMEOUT_SECONDS: float = Field(
+        default=15.0, ge=5.0, le=60.0
+    )
+    LOCAL_PAPER_ANALYSIS_BACKGROUND_TOTAL_DEADLINE_SECONDS: int = Field(
+        default=1200, ge=60, le=86400
     )
     LOCAL_PAPER_DENSE_CANDIDATE_LIMIT: int = Field(default=150, ge=10, le=500)
     LOCAL_PAPER_BM25_CANDIDATE_LIMIT: int = Field(default=150, ge=10, le=500)

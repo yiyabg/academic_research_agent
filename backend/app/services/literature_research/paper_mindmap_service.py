@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic_ai import Agent
 
+from app.core.config import settings
 from app.schemas.literature_research.local_library import LocalPaperRead
 from app.services.llm_provider import build_llm_model, llm_is_configured
 
@@ -159,8 +160,10 @@ class PaperMindmapService:
         papers: list[LocalPaperRead],
         question: str,
         output_format: str = "markdown",
+        mode: str = "FOCUSED",
         model: Any | None = None,
         timeout_seconds: float = 180.0,
+        max_output_tokens: int | None = None,
     ) -> DeepAnalysisResult:
         """Produce a report while retaining the original LLM failure for audit."""
         if not papers:
@@ -171,7 +174,14 @@ class PaperMindmapService:
                 fallback_reason="NO_PAPERS",
             )
 
-        evidence_text = self._build_rich_evidence(papers)
+        normalized_mode = mode.upper()
+        section_chars, evidence_items, evidence_chars = self._context_limits(normalized_mode)
+        evidence_text = self._build_rich_evidence(
+            papers,
+            section_chars=section_chars,
+            evidence_items=evidence_items,
+            evidence_chars=evidence_chars,
+        )
         generated_by_llm = False
         fallback_reason: str | None = None
 
@@ -181,13 +191,28 @@ class PaperMindmapService:
                     question=question,
                     evidence=evidence_text,
                     papers=papers,
+                    mode=normalized_mode,
                     model=model,
                     timeout_seconds=timeout_seconds,
+                    max_output_tokens=max_output_tokens,
                 )
                 generated_by_llm = True
+            except TimeoutError:
+                # ``str(asyncio.TimeoutError())`` is empty.  Persist an
+                # actionable reason instead of rendering an empty LLM error.
+                fallback_reason = (
+                    "TIMEOUT: 代理在 "
+                    f"{timeout_seconds:.0f} 秒内未返回模型结果（请求已安全取消）"
+                )
+                markdown_map = self._generate_structured_fallback(
+                    papers, question, fallback_reason
+                )
             except Exception as exc:
-                markdown_map = self._generate_structured_fallback(papers, question, str(exc))
-                fallback_reason = f"{type(exc).__name__}: {exc}"
+                exception_message = str(exc).strip() or "未提供诊断文本"
+                fallback_reason = f"{type(exc).__name__}: {exception_message}"
+                markdown_map = self._generate_structured_fallback(
+                    papers, question, fallback_reason
+                )
         else:
             markdown_map = self._generate_structured_fallback(papers, question, "LLM未配置")
             fallback_reason = "LLM_NOT_CONFIGURED"
@@ -207,7 +232,25 @@ class PaperMindmapService:
             fallback_reason=fallback_reason,
         )
 
-    def _build_rich_evidence(self, papers: list[LocalPaperRead]) -> str:
+    @staticmethod
+    def _context_limits(mode: str) -> tuple[int, int, int]:
+        """Bound prompt size while keeping every conclusion grounded in a page."""
+        if mode == "COMPREHENSIVE":
+            return 700, 3, 550
+        if mode == "COMPARATIVE":
+            return 560, 2, 480
+        # Focused questions are the normal Q&A replacement.  Ten papers stay
+        # well below a typical compatible gateway's request-size timeout.
+        return 500, 2, 420
+
+    def _build_rich_evidence(
+        self,
+        papers: list[LocalPaperRead],
+        *,
+        section_chars: int,
+        evidence_items: int,
+        evidence_chars: int,
+    ) -> str:
         """Build rich evidence with structured sections (Abstract/Intro/Conclusion) + chunks."""
         parts: list[str] = []
         for i, paper in enumerate(papers, 1):
@@ -220,24 +263,24 @@ class PaperMindmapService:
 
             if paper.abstract_text:
                 abstract_preview = (
-                    paper.abstract_text[:800]
-                    if len(paper.abstract_text) > 800
+                    paper.abstract_text[:section_chars]
+                    if len(paper.abstract_text) > section_chars
                     else paper.abstract_text
                 )
                 sections.append(f"  📄 摘要（Abstract）：\n  {abstract_preview}")
 
             if paper.introduction_text:
                 intro_preview = (
-                    paper.introduction_text[:600]
-                    if len(paper.introduction_text) > 600
+                    paper.introduction_text[:section_chars]
+                    if len(paper.introduction_text) > section_chars
                     else paper.introduction_text
                 )
                 sections.append(f"  📖 引言（Introduction前两段）：\n  {intro_preview}")
 
             if paper.conclusion_text:
                 conclusion_preview = (
-                    paper.conclusion_text[:600]
-                    if len(paper.conclusion_text) > 600
+                    paper.conclusion_text[:section_chars]
+                    if len(paper.conclusion_text) > section_chars
                     else paper.conclusion_text
                 )
                 sections.append(f"  🎯 结论（Conclusion）：\n  {conclusion_preview}")
@@ -245,7 +288,7 @@ class PaperMindmapService:
             # Add evidence chunks as supplementary context (lower priority)
             evidence_snippets: list[str] = []
             seen_parent_context: set[str] = set()
-            for e in paper.evidence[:5]:  # Reduced from 8 to 5 since we have structured sections
+            for e in paper.evidence[:evidence_items]:
                 # Retrieval ranks a small child chunk; deep analysis receives
                 # its larger PostgreSQL parent section with the same page proof.
                 snippet = (e.parent_text or e.text).strip()
@@ -253,8 +296,8 @@ class PaperMindmapService:
                 if context_key in seen_parent_context:
                     continue
                 seen_parent_context.add(context_key)
-                if len(snippet) > 1200:
-                    snippet = snippet[:1200] + "..."
+                if len(snippet) > evidence_chars:
+                    snippet = snippet[:evidence_chars] + "..."
                 heading = f" · {e.section_heading}" if e.section_heading else ""
                 evidence_snippets.append(f"  [p.{e.page_number}{heading}] {snippet}")
 
@@ -290,12 +333,22 @@ class PaperMindmapService:
         question: str,
         evidence: str,
         papers: list[LocalPaperRead],
+        mode: str = "FOCUSED",
         model: Any | None = None,
         timeout_seconds: float = 180.0,
+        max_output_tokens: int | None = None,
     ) -> str:
         import asyncio
 
         system_prompt = DEEP_ANALYSIS_SYSTEM_PROMPT.replace("{topic}", question)
+        if mode == "FOCUSED":
+            system_prompt += (
+                "\n\n## 本次聚焦回答约束\n"
+                "逐篇给出创新点、方法要点与页码证据；每篇至多 3 个要点。"
+                "总输出保持简洁，不重复转述长摘录。"
+            )
+        elif mode == "COMPARATIVE":
+            system_prompt += "\n\n## 本次横向对比约束\n优先呈现共同点、差异和证据边界，避免逐段复述。"
         agent: Agent[str] = Agent(
             model=model or build_llm_model(),
             system_prompt=system_prompt,
@@ -311,7 +364,19 @@ class PaperMindmapService:
         # Fallback belongs to ``analyze_detailed``.  Let this boundary retain
         # the exception type so the job ledger can distinguish timeout,
         # gateway failure and invalid model output.
-        result = await asyncio.wait_for(agent.run(user_prompt), timeout=timeout_seconds)
+        model_settings: dict[str, Any] = {
+            "openai_store": False,
+            "openai_reasoning_effort": settings.LOCAL_PAPER_ANALYSIS_REASONING_EFFORT,
+        }
+        if max_output_tokens is not None:
+            model_settings["max_tokens"] = max_output_tokens
+        result = await asyncio.wait_for(
+            agent.run(
+                user_prompt,
+                model_settings=model_settings,
+            ),
+            timeout=timeout_seconds,
+        )
         return result.output
 
     def _generate_structured_fallback(
@@ -351,10 +416,8 @@ class PaperMindmapService:
             "",
             "## 配置说明",
             "",
-            "要启用 LLM 深度分析，请确保：",
-            "1. `OPENAI_API_KEY` 或 `LLM_PROVIDER` 已正确配置",
-            "2. 网络可访问 LLM 服务",
-            "3. 重新生成思维导图",
+            "本次报告已保留本地页码证据。请在任务审计日志中查看失败原因后重试。",
+            "若原因是超时，请降低论文数量、切换较低推理强度，或由管理员提高代理请求预算。",
         ]
         return "\n".join(lines)
 

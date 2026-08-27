@@ -38,6 +38,11 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --ws websockets-sansio --timeout-graceful-shutdown 10
     networks:
       - backend
+    # Optional, explicit gateway mapping.  This avoids relying on container DNS
+    # when an enterprise proxy is intentionally pinned to a known address.
+    # The default is inert for normal OpenAI-compatible deployments.
+    extra_hosts:
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
     depends_on:
       db:
         condition: service_healthy
@@ -128,6 +133,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     networks:
       - backend
+    extra_hosts:
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
     depends_on:
       app:
         condition: service_started
@@ -155,6 +162,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     networks:
       - backend
+    extra_hosts:
+      - "${LLM_GATEWAY_HOST:-llm-gateway.invalid}:${LLM_GATEWAY_HOST_IP:-127.0.0.1}"
     depends_on:
       app:
         condition: service_started

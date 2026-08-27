@@ -216,7 +216,12 @@ class LocalPaperAnalysisJobRead(BaseSchema):
     owner_id: UUID
     project_id: UUID | None = None
     mode: str
+    execution_mode: Literal["staged", "background"]
     status: AnalysisJobStatus
+    stage: str
+    stage_index: int
+    stage_total: int
+    provider_status: str | None = None
     question: str
     retrieval_run_id: UUID | None = None
     result: dict[str, object] = Field(validation_alias="result_json")

@@ -11,6 +11,9 @@ from app.worker.tasks.literature_research_tasks import (
 from app.worker.tasks.local_paper_library_tasks import (
     check_scheduled_local_paper_syncs,
     run_local_paper_analysis,
+    poll_local_paper_analysis_stage,
+    recover_local_paper_analysis_background,
+    recover_local_paper_analysis_staged,
     sync_local_paper_library,
 )
 from app.worker.tasks.rag_tasks import (
@@ -31,6 +34,9 @@ __all__ = [
     "recover_stalled_research_runs",
     "regenerate_research_artifacts",
     "run_local_paper_analysis",
+    "poll_local_paper_analysis_stage",
+    "recover_local_paper_analysis_background",
+    "recover_local_paper_analysis_staged",
     "sync_collection_task",
     "sync_local_paper_library",
     "sync_single_source_task",

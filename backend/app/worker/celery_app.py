@@ -40,6 +40,12 @@ celery_app.conf.update(
         "app.worker.tasks.local_paper_library_tasks.run_local_paper_analysis": {
             "queue": "research-llm"
         },
+        "app.worker.tasks.local_paper_library_tasks.poll_local_paper_analysis_stage": {
+            "queue": "research-llm"
+        },
+        "app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_staged": {
+            "queue": "research-llm"
+        },
         "app.worker.tasks.local_paper_library_tasks.check_scheduled_local_paper_syncs": {
             "queue": "research-cpu"
         },
@@ -64,5 +70,13 @@ celery_app.conf.beat_schedule = {
     "local-paper-incremental-sync": {
         "task": "app.worker.tasks.local_paper_library_tasks.check_scheduled_local_paper_syncs",
         "schedule": settings.LOCAL_PAPER_SYNC_INTERVAL_SECONDS,
+    },
+    "recover-local-paper-background-analysis": {
+        "task": "app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_background",
+        "schedule": 60.0,
+    },
+    "recover-local-paper-staged-analysis": {
+        "task": "app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_staged",
+        "schedule": 60.0,
     },
 }

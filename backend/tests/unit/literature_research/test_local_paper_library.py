@@ -659,7 +659,11 @@ async def test_hybrid_service_executes_metadata_filtered_dense_bm25_rrf_and_bge(
     db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [paper]))
     db.execute = AsyncMock(
         side_effect=[
-            SimpleNamespace(all=lambda: [SimpleNamespace(id=chunk_id, score=0.7)]),
+            SimpleNamespace(
+                all=lambda: [
+                    SimpleNamespace(id=chunk_id, lexical_terms="hybrid retrieval evidence")
+                ]
+            ),
             SimpleNamespace(all=lambda: [(chunk, section)]),
         ]
     )
