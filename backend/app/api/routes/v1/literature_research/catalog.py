@@ -47,9 +47,9 @@ async def get_paper_evidence(
     current_user: CurrentUser,
     service: ResearchCatalogSvc,
 ) -> object:
-    return (await service.get_paper(
-        run_id=run_id, work_id=work_id, owner_id=current_user.id
-    )).evidence
+    return (
+        await service.get_paper(run_id=run_id, work_id=work_id, owner_id=current_user.id)
+    ).evidence
 
 
 @router.post(

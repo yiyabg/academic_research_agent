@@ -91,9 +91,7 @@ async def collect_exclusion_audit_rows(
         )
         .order_by(ResearchWorkVersion.work_id.asc())
     )
-    parsing: dict[UUID, list[ResearchParsingResult]] = {
-        work_id: [] for work_id in work_ids
-    }
+    parsing: dict[UUID, list[ResearchParsingResult]] = {work_id: [] for work_id in work_ids}
     for work_id, result in parsing_result.all():
         parsing[work_id].append(result)
     analyzed_ids = set(
@@ -131,9 +129,7 @@ async def collect_exclusion_audit_rows(
         else:
             work_acquisitions = acquisitions[work.id]
             usable_fulltext = any(
-                item.allowed
-                and item.malware_scan_status == "CLEAN"
-                and item.object_key is not None
+                item.allowed and item.malware_scan_status == "CLEAN" and item.object_key is not None
                 for item in work_acquisitions
             )
             if not usable_fulltext:
@@ -167,9 +163,7 @@ async def collect_exclusion_audit_rows(
                     eligibility.hard_unknown_count if eligibility is not None else 0
                 ),
                 relevance_decision=(relevance.decision if relevance is not None else None),
-                relevance_score=(
-                    _relevance_score(relevance) if relevance is not None else None
-                ),
+                relevance_score=(_relevance_score(relevance) if relevance is not None else None),
                 reason_codes=sorted(set(reason_codes)),
             )
         )
@@ -189,8 +183,7 @@ async def collect_metric_snapshot_audit_rows(
         )
         .join(
             ResearchMetricSnapshot,
-            ResearchMetricSnapshot.id
-            == ResearchConstraintEvaluation.metric_snapshot_id,
+            ResearchMetricSnapshot.id == ResearchConstraintEvaluation.metric_snapshot_id,
         )
         .join(ResearchWork, ResearchWork.id == ResearchConstraintEvaluation.work_id)
         .outerjoin(

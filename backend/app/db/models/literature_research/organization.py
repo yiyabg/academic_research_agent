@@ -17,9 +17,7 @@ if TYPE_CHECKING:
 class ResearchOrganization(Base, TimestampMixin):
     __tablename__ = "research_organizations"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     slug: Mapped[str] = mapped_column(String(63), unique=True, nullable=False, index=True)
     created_by: Mapped[uuid.UUID] = mapped_column(
@@ -38,17 +36,11 @@ class ResearchOrganization(Base, TimestampMixin):
 class ResearchOrganizationMember(Base, TimestampMixin):
     __tablename__ = "research_organization_members"
     __table_args__ = (
-        UniqueConstraint(
-            "organization_id", "user_id", name="uq_research_organization_member"
-        ),
-        CheckConstraint(
-            "role IN ('OWNER', 'MEMBER')", name="ck_research_org_member_role"
-        ),
+        UniqueConstraint("organization_id", "user_id", name="uq_research_organization_member"),
+        CheckConstraint("role IN ('OWNER', 'MEMBER')", name="ck_research_org_member_role"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("research_organizations.id", ondelete="CASCADE"),

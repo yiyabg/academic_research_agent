@@ -29,9 +29,7 @@ async def create_organization(
 
 
 @router.get("", response_model=list[ResearchOrganizationRead])
-async def list_organizations(
-    current_user: CurrentUser, service: ResearchOrganizationSvc
-) -> object:
+async def list_organizations(current_user: CurrentUser, service: ResearchOrganizationSvc) -> object:
     return await service.list_for_user(current_user.id)
 
 
@@ -75,9 +73,7 @@ async def remove_member(
     current_user: CurrentUser,
     service: ResearchOrganizationSvc,
 ) -> Response:
-    await service.remove_member(
-        organization_id, member_user_id, requested_by=current_user.id
-    )
+    await service.remove_member(organization_id, member_user_id, requested_by=current_user.id)
     # Revocation must take effect before 204 is observable; relying on FastAPI
     # dependency finalization permits a just-revoked caller to win a race.
     await service.db.commit()

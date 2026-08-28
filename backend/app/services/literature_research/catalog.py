@@ -65,9 +65,7 @@ class ResearchCatalogService:
             relevance_decision=(RelevanceDecision(relevance.decision) if relevance else None),
             relevance_score=score,
             relevance_reasons=relevance.reasons_json if relevance else [],
-            relevance_facet_judgement=(
-                relevance.facet_judgement_json if relevance else None
-            ),
+            relevance_facet_judgement=(relevance.facet_judgement_json if relevance else None),
             constraints=[ConstraintDecisionRead.model_validate(item) for item in constraints],
         )
 
@@ -89,16 +87,12 @@ class ResearchCatalogService:
             limit=limit,
         )
 
-    async def get_paper(
-        self, *, run_id: UUID, work_id: UUID, owner_id: UUID
-    ) -> PaperDetailRead:
+    async def get_paper(self, *, run_id: UUID, work_id: UUID, owner_id: UUID) -> PaperDetailRead:
         await self.runs.get_owned(run_id, owner_id)
         work = await catalog_repository.get_work(self.db, run_id=run_id, work_id=work_id)
         if work is None:
             raise NotFoundError(message="Research paper not found")
-        row = await catalog_repository.get_candidate_row(
-            self.db, run_id=run_id, work_id=work_id
-        )
+        row = await catalog_repository.get_candidate_row(self.db, run_id=run_id, work_id=work_id)
         if row is None:
             raise NotFoundError(message="Research paper not found")
         constraints = await catalog_repository.list_constraints_for_works(
@@ -136,9 +130,7 @@ class ResearchCatalogService:
         request: ReanalysisRequest,
     ) -> ReanalysisAccepted:
         run = await self.runs.get_owned(run_id, owner_id)
-        row = await catalog_repository.get_candidate_row(
-            self.db, run_id=run_id, work_id=work_id
-        )
+        row = await catalog_repository.get_candidate_row(self.db, run_id=run_id, work_id=work_id)
         if row is None:
             raise NotFoundError(message="Research paper not found")
         _, version, _, eligibility, relevance = row

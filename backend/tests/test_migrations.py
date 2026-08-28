@@ -6,6 +6,7 @@ These tests ensure that:
 3. The upgrade/downgrade cycle is idempotent
 """
 
+import os
 import subprocess
 import sys
 
@@ -24,9 +25,23 @@ def _db_available() -> bool:
     return result.returncode == 0
 
 
+def _isolated_database_authorized() -> bool:
+    """Guard destructive downgrade tests from accidentally using an app database.
+
+    Migration rollback tests intentionally remove every schema object.  They
+    must only run when the caller explicitly marks the configured PostgreSQL
+    endpoint as disposable (for example a CI service or a no-volume Docker
+    container), never merely because a developer's database is reachable.
+    """
+    return os.environ.get("MIGRATION_TEST_ISOLATED_DATABASE") == "1"
+
+
 pytestmark = pytest.mark.skipif(
-    not _db_available(),
-    reason="No live database available — skipping migration tests",
+    not _isolated_database_authorized() or not _db_available(),
+    reason=(
+        "Migration tests require MIGRATION_TEST_ISOLATED_DATABASE=1 and a reachable "
+        "disposable PostgreSQL database"
+    ),
 )
 
 

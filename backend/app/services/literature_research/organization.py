@@ -67,17 +67,13 @@ class ResearchOrganizationService:
         if membership is None:
             raise NotFoundError(message="Research organization not found")
         if membership.role != ResearchOrganizationRole.OWNER.value:
-            raise AuthorizationError(
-                message="Research organization owner privileges required"
-            )
+            raise AuthorizationError(message="Research organization owner privileges required")
 
     async def list_members(
         self, organization_id: UUID, *, requested_by: UUID
     ) -> list[ResearchOrganizationMemberRead]:
         await self.require_member(organization_id, requested_by)
-        rows = await organization_repo.list_members(
-            self.db, organization_id=organization_id
-        )
+        rows = await organization_repo.list_members(self.db, organization_id=organization_id)
         return [
             ResearchOrganizationMemberRead(
                 organization_id=membership.organization_id,

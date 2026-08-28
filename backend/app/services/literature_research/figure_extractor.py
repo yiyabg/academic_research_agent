@@ -34,9 +34,7 @@ def extract_figure_artifacts(
                     evidence_ids=[locator.evidence_id],
                     document_sha256=locator.document_sha256,
                     bbox=locator.bbox,
-                    artifact_kind=(
-                        "table" if label.casefold().startswith("table") else "figure"
-                    ),
+                    artifact_kind=("table" if label.casefold().startswith("table") else "figure"),
                 ),
             )
     return sorted(artifacts.values(), key=lambda item: (item.page_number or 0, item.label))

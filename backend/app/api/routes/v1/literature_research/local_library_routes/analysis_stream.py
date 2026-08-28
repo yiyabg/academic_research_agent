@@ -14,11 +14,20 @@ from app.services.literature_research.local_paper_analysis import LocalPaperAnal
 from .streaming import analysis_event_sequence, decode_pubsub_event
 
 router = APIRouter()
+
+
 @router.websocket("/analysis-jobs/{job_id}/stream")
-async def stream_analysis(websocket: WebSocket, job_id: UUID, user: CurrentUserWS, after_sequence: int = Query(default=0, ge=0)) -> None:
+async def stream_analysis(
+    websocket: WebSocket,
+    job_id: UUID,
+    user: CurrentUserWS,
+    after_sequence: int = Query(default=0, ge=0),
+) -> None:
     async with get_db_context() as db:
         try:
-            events = await LocalPaperAnalysisService(db).list_events(job_id=job_id, owner_id=user.id, after_sequence=after_sequence)
+            events = await LocalPaperAnalysisService(db).list_events(
+                job_id=job_id, owner_id=user.id, after_sequence=after_sequence
+            )
         except (AuthorizationError, NotFoundError):
             await websocket.close(code=4403)
             return

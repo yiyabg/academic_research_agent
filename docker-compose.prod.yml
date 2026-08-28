@@ -15,6 +15,7 @@ x-backend-environment: &backend-environment
   SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
   API_KEY: ${API_KEY:?API_KEY is required}
   POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
   POSTGRES_USER: ${POSTGRES_USER:-postgres}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
   POSTGRES_DB: ${POSTGRES_DB:-academic_research_agent}
@@ -302,7 +303,7 @@ services:
     <<: *research-worker
     command: >-
       celery -A app.worker.celery_app worker --loglevel=info
-      -Q research-llm,paper-analysis --concurrency=${RESEARCH_LLM_CONCURRENCY:-4}
+      -Q research-llm,paper-analysis --concurrency=${RESEARCH_LLM_CONCURRENCY:-1}
     volumes: [models_cache:/app/models_cache]
     depends_on:
       migrate: {condition: service_completed_successfully}

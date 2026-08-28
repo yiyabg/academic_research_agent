@@ -187,12 +187,8 @@ async def main(base_url: str) -> None:
         candidates = await checked(
             await client.get(f"/api/v1/research/runs/{run['id']}/candidates?limit=200")
         )
-        evidence = await checked(
-            await client.get(f"/api/v1/research/runs/{run['id']}/evidence")
-        )
-        artifacts = await checked(
-            await client.get(f"/api/v1/research/runs/{run['id']}/artifacts")
-        )
+        evidence = await checked(await client.get(f"/api/v1/research/runs/{run['id']}/evidence"))
+        artifacts = await checked(await client.get(f"/api/v1/research/runs/{run['id']}/artifacts"))
         assert isinstance(candidates, dict)
         assert isinstance(evidence, list) and isinstance(artifacts, list)
         summary = {

@@ -59,7 +59,9 @@ def poll_local_paper_analysis_stage(self, stage_id: str) -> None:
     asyncio.run(run())
 
 
-@shared_task(name="app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_background")
+@shared_task(
+    name="app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_background"
+)
 def recover_local_paper_analysis_background() -> int:
     """Recover due provider polls from PostgreSQL after worker/process restarts."""
 
@@ -98,11 +100,16 @@ def recover_local_paper_analysis_staged() -> int:
             rows = (
                 await db.scalars(
                     select(LocalPaperAnalysisStage.id)
-                    .join(LocalPaperAnalysisJob, LocalPaperAnalysisJob.id == LocalPaperAnalysisStage.job_id)
+                    .join(
+                        LocalPaperAnalysisJob,
+                        LocalPaperAnalysisJob.id == LocalPaperAnalysisStage.job_id,
+                    )
                     .where(
                         LocalPaperAnalysisStage.status == "RUNNING",
                         LocalPaperAnalysisJob.execution_mode == "staged",
-                        LocalPaperAnalysisJob.status.not_in(["COMPLETED", "PARTIAL", "FAILED", "CANCELLED"]),
+                        LocalPaperAnalysisJob.status.not_in(
+                            ["COMPLETED", "PARTIAL", "FAILED", "CANCELLED"]
+                        ),
                     )
                 )
             ).all()
@@ -117,7 +124,9 @@ def recover_local_paper_analysis_staged() -> int:
             )
 
             service = LocalPaperAnalysisService(db)
-            return await LocalPaperAnalysisOrchestrator(service).recover_staged_stage(UUID(stage_id))
+            return await LocalPaperAnalysisOrchestrator(service).recover_staged_stage(
+                UUID(stage_id)
+            )
 
     return sum(bool(asyncio.run(recover_one(stage_id))) for stage_id in stage_ids)
 

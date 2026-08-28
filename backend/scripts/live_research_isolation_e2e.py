@@ -103,9 +103,7 @@ async def main(base_url: str) -> None:
         probes = {
             "run": await outsider.get(f"/api/v1/research/runs/{run['id']}"),
             "events": await outsider.get(f"/api/v1/research/runs/{run['id']}/events"),
-            "candidates": await outsider.get(
-                f"/api/v1/research/runs/{run['id']}/candidates"
-            ),
+            "candidates": await outsider.get(f"/api/v1/research/runs/{run['id']}/candidates"),
             "artifacts": await outsider.get(f"/api/v1/research/runs/{run['id']}/artifacts"),
             "cancel": await outsider.post(f"/api/v1/research/runs/{run['id']}:cancel"),
             "pause": await outsider.post(f"/api/v1/research/runs/{run['id']}:pause"),

@@ -29,6 +29,7 @@ from app.worker.celery_app import celery_app
 
 router = APIRouter()
 
+
 async def _active_research_queues() -> dict[str, list[dict[str, Any]]] | None:
     """Run Celery's blocking inspector outside the API event loop."""
     inspector = celery_app.control.inspect(timeout=1.5)

@@ -35,6 +35,7 @@ class TestYearParsing:
         result = parser.parse(query="2024至2026年发表的文章")
         assert result.effective_filters["year_from"] == 2024
         assert result.effective_filters["year_to"] == 2026
+        assert result.semantic_query == ""
 
     def test_year_from(self, parser: LocalPaperQueryParser) -> None:
         result = parser.parse(query="从2024年起的论文")
@@ -45,6 +46,17 @@ class TestYearParsing:
         result = parser.parse(query="截至2026年的论文")
         assert result.effective_filters["year_to"] == 2026
         assert "year_from" not in result.effective_filters
+
+    def test_year_forms_required_by_search_contract(self, parser: LocalPaperQueryParser) -> None:
+        exact = parser.parse(query="发表于2026年的语义通信论文")
+        assert exact.semantic_query == "语义通信论文"
+        assert exact.effective_filters == {"year_from": 2026, "year_to": 2026}
+
+        from_year = parser.parse(query="2024年及以后的论文")
+        assert from_year.effective_filters == {"year_from": 2024}
+
+        until_year = parser.parse(query="2026年以前的论文")
+        assert until_year.effective_filters == {"year_to": 2026}
 
     def test_false_positive_6g(self, parser: LocalPaperQueryParser) -> None:
         result = parser.parse(query="6G networks and semantic communication")
@@ -65,6 +77,14 @@ class TestYearParsing:
         result = parser.parse(query="IEEE 802.11 wireless standards")
         assert "year_from" not in result.effective_filters
         assert "IEEE 802.11" in result.semantic_query
+
+    def test_real_year_is_not_lost_when_query_also_mentions_6g(
+        self, parser: LocalPaperQueryParser
+    ) -> None:
+        result = parser.parse(query="6G 2026年发表的 semantic communication")
+        assert result.effective_filters["year_from"] == 2026
+        assert result.effective_filters["year_to"] == 2026
+        assert "6G" in result.semantic_query
 
 
 class TestDOIParsing:
@@ -114,11 +134,35 @@ class TestExplicitOverride:
         assert result.filter_sources["author"] == "explicit"
 
 
+class TestMarkedMetadataFilters:
+    def test_only_high_confidence_markers_are_parsed(self, parser: LocalPaperQueryParser) -> None:
+        result = parser.parse(
+            query="作者: Zhang Wei; 期刊: IEEE TWC; 关键词: semantic communication, VLA"
+        )
+        assert result.effective_filters["author"] == "Zhang Wei"
+        assert result.effective_filters["venue"] == "IEEE TWC"
+        assert result.effective_filters["keywords"] == ["semantic communication", "VLA"]
+        assert result.filter_sources["author"] == "parsed"
+
+    def test_explicit_filters_win_over_marked_filters(self, parser: LocalPaperQueryParser) -> None:
+        result = parser.parse(
+            query="author: Zhang Wei; venue: IEEE TCCN; keywords: semantic communication, VLA",
+            author="Li Lei",
+            venue="IEEE JSAC",
+            keywords=["agent"],
+        )
+        assert result.effective_filters["author"] == "Li Lei"
+        assert result.effective_filters["venue"] == "IEEE JSAC"
+        assert result.effective_filters["keywords"] == ["agent"]
+
+
 class TestValidation:
     def test_invalid_year_range_parsed(self, parser: LocalPaperQueryParser) -> None:
         result = parser.parse(query="2026-2024年的论文")
         # Should not apply invalid range
-        assert "year_from" not in result.effective_filters or "year_to" not in result.effective_filters
+        assert (
+            "year_from" not in result.effective_filters or "year_to" not in result.effective_filters
+        )
 
     def test_invalid_year_range_explicit(self, parser: LocalPaperQueryParser) -> None:
         result = parser.parse(query="论文", year_from=2026, year_to=2024)

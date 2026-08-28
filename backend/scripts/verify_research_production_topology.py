@@ -139,9 +139,7 @@ def verify(config: dict[str, Any], *, allow_local_domain: bool) -> dict[str, Any
             raise RuntimeError("LLM_BASE_URL must not contain credentials")
     elif llm_base_url:
         raise RuntimeError("LLM_BASE_URL is only valid for openai_compatible")
-    llm_credential_name = (
-        "DEEPSEEK_API_KEY" if llm_provider == "deepseek" else "OPENAI_API_KEY"
-    )
+    llm_credential_name = "DEEPSEEK_API_KEY" if llm_provider == "deepseek" else "OPENAI_API_KEY"
 
     expected_dependencies = {"migrate", "minio-init", "grobid", "clamav", "qdrant", "redis"}
     missing_dependencies = expected_dependencies - _dependencies(app)
@@ -158,9 +156,7 @@ def verify(config: dict[str, Any], *, allow_local_domain: bool) -> dict[str, Any
         command = _command_text(service)
         missing_queues = [queue for queue in required_queues if queue not in command]
         if missing_queues:
-            raise RuntimeError(
-                f"{service_name} does not declare required queues {missing_queues}"
-            )
+            raise RuntimeError(f"{service_name} does not declare required queues {missing_queues}")
         worker_env = _environment(service)
         for name in ("S3_ENDPOINT", "GROBID_URL", "CLAMAV_HOST", "CELERY_BROKER_URL"):
             if worker_env.get(name) != app_env.get(name):
@@ -195,9 +191,7 @@ def verify(config: dict[str, Any], *, allow_local_domain: bool) -> dict[str, Any
                 item.strip() for item in runtime_env.get("NO_PROXY", "").split(",") if item.strip()
             }
             if required_no_proxy - no_proxy:
-                raise RuntimeError(
-                    f"{service_name} HTTPS proxy lacks internal NO_PROXY exclusions"
-                )
+                raise RuntimeError(f"{service_name} HTTPS proxy lacks internal NO_PROXY exclusions")
 
     volumes = set(config.get("volumes", {}))
     expected_volumes = {

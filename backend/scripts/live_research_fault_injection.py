@@ -96,9 +96,7 @@ async def exercise(base_url: str) -> None:
         if sequences != list(range(1, len(sequences) + 1)):
             raise RuntimeError(f"Event sequence is not contiguous: {sequences}")
         recovery_events = [
-            item
-            for item in events
-            if item["payload"].get("recovery") == "REENQUEUED_STALLED_STAGE"
+            item for item in events if item["payload"].get("recovery") == "REENQUEUED_STALLED_STAGE"
         ]
         if not recovery_events:
             raise RuntimeError("Watchdog recovery event was not persisted")

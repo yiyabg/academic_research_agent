@@ -87,9 +87,7 @@ async def list_for_project(db: AsyncSession, project_id: UUID) -> list[ResearchP
     return list(result.scalars().all())
 
 
-async def get_latest_approved(
-    db: AsyncSession, project_id: UUID
-) -> ResearchProtocolVersion | None:
+async def get_latest_approved(db: AsyncSession, project_id: UUID) -> ResearchProtocolVersion | None:
     return await db.scalar(
         select(ResearchProtocolVersion)
         .where(

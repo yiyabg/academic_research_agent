@@ -40,9 +40,7 @@ logger = logging.getLogger(__name__)
 
 def _enqueue_memory_index(memory_id: UUID) -> None:
     try:
-        index_research_project_memory.apply_async(
-            args=(str(memory_id),), queue="research-cpu"
-        )
+        index_research_project_memory.apply_async(args=(str(memory_id),), queue="research-cpu")
     except Exception:
         logger.exception("Project memory %s persisted but could not be indexed", memory_id)
 
@@ -85,9 +83,7 @@ async def confirm_profile(
     current_user: CurrentUser,
     db: DBSession,
 ) -> object:
-    profile = await memory_repository.confirm_profile(
-        db, user_id=current_user.id, body=body
-    )
+    profile = await memory_repository.confirm_profile(db, user_id=current_user.id, body=body)
     await db.commit()
     return profile
 

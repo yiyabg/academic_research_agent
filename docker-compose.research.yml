@@ -49,6 +49,7 @@ services:
       - ./backend/alembic:/app/alembic:ro
     environment:
       - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
     networks: [backend]
     depends_on:
       db: {condition: service_healthy}
@@ -154,6 +155,7 @@ services:
     env_file: [./backend/.env]
     environment: &research-worker-env
       - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
       - REDIS_HOST=redis
       - QDRANT_HOST=qdrant
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -218,9 +220,14 @@ services:
   research-worker-llm:
     image: academic_research_agent_backend:dev
     pull_policy: never
-    command: celery -A app.worker.celery_app worker --loglevel=info -Q research-llm,paper-analysis --concurrency=4
+    command: celery -A app.worker.celery_app worker --loglevel=info -Q research-llm,paper-analysis --concurrency=1
     env_file: [./backend/.env]
-    volumes: [models_cache:/app/models_cache]
+    volumes:
+      # The filesystem object-store fallback writes analysis artifacts under
+      # /app/media.  Keep it shared with the API so the artifact endpoint can
+      # serve a completed staged/background report.
+      - media_data:/app/media
+      - models_cache:/app/models_cache
     environment: *research-worker-env
     networks: [backend]
     extra_hosts:

@@ -92,7 +92,9 @@ async def test_memory_context_semantically_retrieves_then_validates_with_postgre
             new=AsyncMock(return_value=approved_row),
         ),
     ):
-        bundle = await ResearchProtocolMemoryContextService(AsyncMock()).resolve_for_protocol_advice(
+        bundle = await ResearchProtocolMemoryContextService(
+            AsyncMock()
+        ).resolve_for_protocol_advice(
             project=project,
             owner_id=owner_id,
             request=ProtocolCompileRequest(
@@ -155,7 +157,9 @@ async def test_memory_context_falls_back_and_removes_hard_or_secret_keys() -> No
             new=AsyncMock(return_value=None),
         ),
     ):
-        bundle = await ResearchProtocolMemoryContextService(AsyncMock()).resolve_for_protocol_advice(
+        bundle = await ResearchProtocolMemoryContextService(
+            AsyncMock()
+        ).resolve_for_protocol_advice(
             project=project,
             owner_id=uuid4(),
             request=ProtocolCompileRequest(topic="current topic"),

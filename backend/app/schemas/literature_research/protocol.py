@@ -263,9 +263,7 @@ class ProtocolAdviceMemoryProvenance(BaseSchema):
     profile_version: int | None = Field(default=None, ge=1)
     policy_versions: dict[str, int] = Field(default_factory=dict)
     policy_hashes: dict[str, str] = Field(default_factory=dict)
-    approved_protocol_hash: str | None = Field(
-        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
-    )
+    approved_protocol_hash: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
     ignored_memory_keys: list[str] = Field(default_factory=list)
     retrieval_error_type: str | None = Field(default=None, max_length=200)
 

@@ -41,9 +41,7 @@ async def test_exclusions_stop_at_first_failed_pipeline_boundary() -> None:
     version_a = SimpleNamespace(id=uuid4(), doi="10.1000/hard")
     version_b = SimpleNamespace(id=uuid4(), doi="10.1000/fulltext")
     venue = SimpleNamespace(name="Auditable Journal")
-    hard_eligibility = SimpleNamespace(
-        eligible=False, hard_fail_count=1, hard_unknown_count=0
-    )
+    hard_eligibility = SimpleNamespace(eligible=False, hard_fail_count=1, hard_unknown_count=0)
     eligible = SimpleNamespace(eligible=True, hard_fail_count=0, hard_unknown_count=0)
     relevance = SimpleNamespace(
         decision="PASS",
@@ -68,8 +66,7 @@ async def test_exclusions_stop_at_first_failed_pipeline_boundary() -> None:
 
     with (
         patch(
-            "app.services.literature_research.audit_exports.catalog_repository."
-            "list_candidate_rows",
+            "app.services.literature_research.audit_exports.catalog_repository.list_candidate_rows",
             new=AsyncMock(
                 return_value=(
                     [
@@ -91,9 +88,7 @@ async def test_exclusions_stop_at_first_failed_pipeline_boundary() -> None:
             ),
         ),
     ):
-        rows = await collect_exclusion_audit_rows(
-            db, run_id=run_id, included_work_ids=set()
-        )
+        rows = await collect_exclusion_audit_rows(db, run_id=run_id, included_work_ids=set())
 
     by_id = {row.work_id: row for row in rows}
     assert by_id[hard_failed_id].reason_codes == ["COMPARISON_FAILED"]

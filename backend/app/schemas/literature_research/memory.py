@@ -97,13 +97,10 @@ class ProjectMemoryCreate(BaseSchema):
     def valid_window(self) -> "ProjectMemoryCreate":
         if self.valid_to and self.valid_from > self.valid_to:
             raise ValueError("valid_from must not be after valid_to")
-        hard_paths = _matching_paths(
-            self.content, markers=_HARD_MEMORY_KEYS, contains=False
-        )
+        hard_paths = _matching_paths(self.content, markers=_HARD_MEMORY_KEYS, contains=False)
         if hard_paths:
             raise ValueError(
-                "memory cannot override approved protocol hard semantics: "
-                + ", ".join(hard_paths)
+                "memory cannot override approved protocol hard semantics: " + ", ".join(hard_paths)
             )
         _reject_sensitive_keys(self.content)
         return self
@@ -204,13 +201,10 @@ class PolicyVersionCreate(BaseSchema):
     def valid_window(self) -> "PolicyVersionCreate":
         if self.valid_to and self.valid_from > self.valid_to:
             raise ValueError("valid_from must not be after valid_to")
-        hard_paths = _matching_paths(
-            self.content, markers=_HARD_MEMORY_KEYS, contains=False
-        )
+        hard_paths = _matching_paths(self.content, markers=_HARD_MEMORY_KEYS, contains=False)
         if hard_paths:
             raise ValueError(
-                "policy cannot override approved protocol hard semantics: "
-                + ", ".join(hard_paths)
+                "policy cannot override approved protocol hard semantics: " + ", ".join(hard_paths)
             )
         _reject_sensitive_keys(self.content)
         return self

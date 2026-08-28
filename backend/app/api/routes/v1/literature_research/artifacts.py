@@ -23,10 +23,9 @@ router = APIRouter()
 
 def _catalog_artifacts_are_downloadable(run) -> bool:
     """Search-only outputs are immutable metadata catalogs, not release-gated analyses."""
-    return (
-        ExecutionMode(run.execution_mode) == ExecutionMode.SEARCH_ONLY
-        and RunState(run.state) in {RunState.COMPLETED, RunState.PARTIALLY_COMPLETED}
-    )
+    return ExecutionMode(run.execution_mode) == ExecutionMode.SEARCH_ONLY and RunState(
+        run.state
+    ) in {RunState.COMPLETED, RunState.PARTIALLY_COMPLETED}
 
 
 @router.get("/{run_id}/artifacts", response_model=list[ArtifactRead])

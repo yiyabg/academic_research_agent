@@ -289,9 +289,7 @@ class ResearchPipelineStages:
                             unpaywall_failure_count += 1
                     candidate = unpaywall_cache[normalized_doi]
                     if candidate is not None:
-                        candidates.append(
-                            candidate.model_copy(update={"version_id": version.id})
-                        )
+                        candidates.append(candidate.model_copy(update={"version_id": version.id}))
                 if not candidates:
                     decision = FullTextAcquisitionDecision(
                         version_id=version.id,
@@ -513,8 +511,10 @@ class ResearchPipelineStages:
         if not isinstance(raw_selection, list):
             raise RuntimeError("Search-only run is missing its frozen catalog selection")
         rows = await evidence_repository.list_catalog_report_rows(self.db, run_id=run.id)
-        by_identity = {(str(work.id), str(version.id)): (work, version, venue, relevance)
-                       for work, version, venue, relevance in rows}
+        by_identity = {
+            (str(work.id), str(version.id)): (work, version, venue, relevance)
+            for work, version, venue, relevance in rows
+        }
         papers: list[CatalogPaper] = []
         for item in raw_selection:
             if not isinstance(item, dict):
@@ -529,7 +529,9 @@ class ResearchPipelineStages:
                 raise RuntimeError("Search-only catalog selection is missing rank or score")
             row = by_identity.get((work_id, version_id))
             if row is None:
-                raise RuntimeError("Frozen catalog selection no longer satisfies strict metadata gates")
+                raise RuntimeError(
+                    "Frozen catalog selection no longer satisfies strict metadata gates"
+                )
             work, version, venue, _relevance = row
             papers.append(
                 CatalogPaper(
@@ -569,7 +571,9 @@ class ResearchPipelineStages:
             run.id, generation=generation
         )
         if errors:
-            raise RuntimeError(f"Catalog artifact persistence validation failed: {'; '.join(errors)}")
+            raise RuntimeError(
+                f"Catalog artifact persistence validation failed: {'; '.join(errors)}"
+            )
         return {
             "artifact_count": len(artifacts),
             "catalog_artifact_count": len(artifacts),
@@ -694,9 +698,7 @@ class ResearchPipelineStages:
 
     async def analyze(self, run: ResearchRun) -> dict[str, object]:
         """Evaluate the durable shard barrier; never call an expert in the coordinator."""
-        counts = await analysis_repository.summarize_initial_analysis_tasks(
-            self.db, run_id=run.id
-        )
+        counts = await analysis_repository.summarize_initial_analysis_tasks(self.db, run_id=run.id)
         terminal = counts["succeeded"] + counts["failed_terminal"] + counts["blocked"]
         if terminal != counts["total"]:
             raise RuntimeError("Paper-analysis barrier is not complete")
@@ -704,9 +706,7 @@ class ResearchPipelineStages:
         snapshots: list[dict[str, object]] = []
         for task in tasks:
             output_usage = (
-                task.output_json.get("llm_usage")
-                if isinstance(task.output_json, dict)
-                else None
+                task.output_json.get("llm_usage") if isinstance(task.output_json, dict) else None
             )
             if isinstance(output_usage, dict):
                 snapshots.append(output_usage)
@@ -897,9 +897,7 @@ class ResearchPipelineStages:
             run_id=run.id,
             included_work_ids=included_work_ids,
         )
-        metric_snapshot_rows = await collect_metric_snapshot_audit_rows(
-            self.db, run_id=run.id
-        )
+        metric_snapshot_rows = await collect_metric_snapshot_audit_rows(self.db, run_id=run.id)
         artifacts = await ArtifactService(self.db).render_all(
             report,
             organization_id=run.organization_id,

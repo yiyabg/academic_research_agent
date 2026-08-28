@@ -167,9 +167,7 @@ class LocalPaperAnalysisService:
         # protect retries from one browser, while this lock also protects
         # double-clicks, stale tabs, and concurrent browser sessions.
         library = await self.db.scalar(
-            select(LocalPaperLibrary)
-            .where(LocalPaperLibrary.id == library.id)
-            .with_for_update()
+            select(LocalPaperLibrary).where(LocalPaperLibrary.id == library.id).with_for_update()
         )
         if library is None:
             raise NotFoundError("本地文献库不存在")
@@ -375,7 +373,9 @@ class LocalPaperAnalysisService:
                         detail={"error_code": job.error_code},
                     )
                 )
-            logger.exception("Local paper analysis failed job_id=%s error_type=%s", job_id, type(exc).__name__)
+            logger.exception(
+                "Local paper analysis failed job_id=%s error_type=%s", job_id, type(exc).__name__
+            )
             raise
 
     async def poll_background_stage(self, *, stage_id: UUID) -> None:
@@ -579,7 +579,9 @@ class LocalPaperAnalysisService:
                 error_type=normalized_error_code,
                 error_message=error_summary,
                 normalized_error_code=normalized_error_code,
-                endpoint_hash=hashlib.sha256(settings.LLM_BASE_URL.rstrip("/").encode()).hexdigest()[:16],
+                endpoint_hash=hashlib.sha256(
+                    settings.LLM_BASE_URL.rstrip("/").encode()
+                ).hexdigest()[:16],
                 prompt_sha256=hashlib.sha256(job.question.encode()).hexdigest(),
             )
         )
@@ -597,7 +599,9 @@ class LocalPaperAnalysisService:
                     user_input=job.question,
                     assistant_output=content,
                     evidence_manifest_json=job.evidence_json,
-                    metadata_json={"output_format": job.request_json.get("output_format", "markdown")},
+                    metadata_json={
+                        "output_format": job.request_json.get("output_format", "markdown")
+                    },
                 )
             )
         else:

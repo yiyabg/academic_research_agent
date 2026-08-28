@@ -211,9 +211,7 @@ class ResearchVectorIndex:
             query_filter=Filter(
                 must=[
                     FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id)),
-                    FieldCondition(
-                        key="project_id", match=MatchValue(value=str(project_id))
-                    ),
+                    FieldCondition(key="project_id", match=MatchValue(value=str(project_id))),
                 ]
             ),
             limit=limit,

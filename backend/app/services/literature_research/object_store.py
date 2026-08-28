@@ -19,9 +19,7 @@ def validate_object_key(key: str) -> str:
     return str(path)
 
 
-def research_object_prefix(
-    *, organization_id: UUID | None, project_id: UUID, run_id: UUID
-) -> str:
+def research_object_prefix(*, organization_id: UUID | None, project_id: UUID, run_id: UUID) -> str:
     tenant = str(organization_id) if organization_id else "personal"
     return f"tenants/{tenant}/projects/{project_id}/runs/{run_id}"
 

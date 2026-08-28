@@ -139,9 +139,7 @@ async def test_advice_fills_only_omitted_semantics_and_persists_provenance(
     expert = MagicMock()
     expert.protocol.run = AsyncMock(return_value=advice)
     service.project_service.get_owned = AsyncMock(return_value=MagicMock())
-    service.memory_context.resolve_for_protocol_advice = AsyncMock(
-        return_value=memory_bundle()
-    )
+    service.memory_context.resolve_for_protocol_advice = AsyncMock(return_value=memory_bundle())
     stored = MagicMock()
 
     with (
@@ -207,13 +205,9 @@ async def test_advice_budget_exhaustion_maps_to_http_429(
     service: ResearchProtocolService,
 ) -> None:
     service.project_service.get_owned = AsyncMock(return_value=MagicMock())
-    service.memory_context.resolve_for_protocol_advice = AsyncMock(
-        return_value=memory_bundle()
-    )
+    service.memory_context.resolve_for_protocol_advice = AsyncMock(return_value=memory_bundle())
     expert = MagicMock()
-    expert.protocol.run = AsyncMock(
-        side_effect=ResearchLLMBudgetExceeded("approved limit reached")
-    )
+    expert.protocol.run = AsyncMock(side_effect=ResearchLLMBudgetExceeded("approved limit reached"))
     with (
         patch(
             "app.services.literature_research.protocol.LiteratureResearchExperts",

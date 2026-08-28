@@ -280,9 +280,7 @@ ResearchEvaluationSvc = Annotated[
 ResearchOrganizationSvc = Annotated[
     ResearchOrganizationService, Depends(get_research_organization_service)
 ]
-ActiveResearchOrganizationId = Annotated[
-    UUID | None, Depends(get_active_research_organization_id)
-]
+ActiveResearchOrganizationId = Annotated[UUID | None, Depends(get_active_research_organization_id)]
 
 
 _WS_TOKEN_PROTOCOL_PREFIX = "access_token."

@@ -53,8 +53,7 @@ class QueryPlannerService:
         positive_facet_ids = [
             facet.facet_id
             for facet in (
-                protocol.topic_model.must_have_facets
-                + protocol.topic_model.should_have_facets
+                protocol.topic_model.must_have_facets + protocol.topic_model.should_have_facets
             )
         ]
         limit = settings.RESEARCH_DISCOVERY_DOI_CANDIDATE_LIMIT

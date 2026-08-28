@@ -52,9 +52,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "uq_analysis_run_work_attempt", "research_paper_analyses", type_="unique"
-    )
+    op.drop_constraint("uq_analysis_run_work_attempt", "research_paper_analyses", type_="unique")
     op.drop_column("research_paper_analyses", "supersedes_analysis_id")
     op.drop_column("research_paper_analyses", "requested_by")
     op.drop_column("research_paper_analyses", "trigger")

@@ -177,7 +177,9 @@ class LocalPaperSection(Base, TimestampMixin):
     bbox_json: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
     section_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     heading_path_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    section_type: Mapped[str] = mapped_column(String(48), nullable=False, default="BODY", index=True)
+    section_type: Mapped[str] = mapped_column(
+        String(48), nullable=False, default="BODY", index=True
+    )
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -385,6 +387,7 @@ class LocalPaperRetrievalRun(Base, TimestampMixin):
     request_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     summary_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     trace_cache_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
 
 class LocalPaperSyncRun(Base, TimestampMixin):
     __tablename__ = "local_paper_sync_runs"

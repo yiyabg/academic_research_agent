@@ -10,7 +10,6 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-
 revision = "0053_add_venue_keywords"
 down_revision = "0052_local_paper_analysis_stages"
 branch_labels = None

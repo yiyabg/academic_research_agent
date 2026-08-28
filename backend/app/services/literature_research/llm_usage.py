@@ -58,7 +58,11 @@ class LLMUsageCollector:
             ("requests", total.requests, self.budget.max_requests),
             ("input_tokens", total.input_tokens, self.budget.max_input_tokens),
             ("output_tokens", total.output_tokens, self.budget.max_output_tokens),
-            ("total_tokens", total.input_tokens + total.output_tokens, self.budget.max_total_tokens),
+            (
+                "total_tokens",
+                total.input_tokens + total.output_tokens,
+                self.budget.max_total_tokens,
+            ),
         )
         for name, actual, limit in checks:
             if actual > limit:
@@ -100,9 +104,7 @@ class LLMUsageCollector:
         remaining_requests = self.budget.max_requests - total.requests
         remaining_input = self.budget.max_input_tokens - total.input_tokens
         remaining_output = self.budget.max_output_tokens - total.output_tokens
-        remaining_total = (
-            self.budget.max_total_tokens - total.input_tokens - total.output_tokens
-        )
+        remaining_total = self.budget.max_total_tokens - total.input_tokens - total.output_tokens
         if min(remaining_requests, remaining_input, remaining_output, remaining_total) <= 0:
             self._check_budget()
             raise ResearchLLMBudgetExceeded("Approved LLM operation budget is exhausted")
@@ -147,9 +149,7 @@ def _snapshot(agents: dict[str, _AgentUsage]) -> dict[str, Any]:
             total.details[key] = total.details.get(key, 0) + value
     return {
         "total": _usage_payload(total),
-        "by_agent": {
-            name: _usage_payload(item) for name, item in sorted(agents.items())
-        },
+        "by_agent": {name: _usage_payload(item) for name, item in sorted(agents.items())},
     }
 
 

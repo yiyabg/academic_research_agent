@@ -80,9 +80,7 @@ def test_aggregate_preserves_unavailable_cost_and_retry_usage() -> None:
     unpriced_retry = LLMUsageCollector(_budget())
     unpriced_retry.record("analysis", RunUsage(requests=1, input_tokens=50, output_tokens=5))
 
-    aggregate = aggregate_usage_snapshots(
-        [reported.snapshot(), unpriced_retry.snapshot()]
-    )
+    aggregate = aggregate_usage_snapshots([reported.snapshot(), unpriced_retry.snapshot()])
 
     assert aggregate["total"]["invocations"] == 2
     assert aggregate["total"]["requests"] == 2

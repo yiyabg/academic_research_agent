@@ -66,13 +66,11 @@ async def test_memory_governance_writes_commit_before_returning() -> None:
     policy = object()
     with (
         patch(
-            "app.api.routes.v1.literature_research.memory.memory_repository."
-            "confirm_profile",
+            "app.api.routes.v1.literature_research.memory.memory_repository.confirm_profile",
             new=AsyncMock(return_value=profile),
         ),
         patch(
-            "app.api.routes.v1.literature_research.memory.memory_repository."
-            "create_policy_version",
+            "app.api.routes.v1.literature_research.memory.memory_repository.create_policy_version",
             new=AsyncMock(return_value=policy),
         ),
     ):

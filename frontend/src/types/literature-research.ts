@@ -54,6 +54,8 @@ export interface LocalPaper {
   bibtex_type: string;
   source_kind: "pdf" | "html";
   relative_source_path: string;
+  venue?: string | null;
+  keywords?: string[];
   evidence: Array<{
     page_number: number;
     chunk_index: number;
@@ -71,6 +73,14 @@ export interface LocalPaper {
   }>;
 }
 
+export interface QueryInterpretation {
+  raw_query: string;
+  semantic_query: string;
+  effective_filters: Record<string, unknown>;
+  filter_sources: Record<string, string>;
+  warnings: string[];
+}
+
 export interface LocalPaperSearchResponse {
   items: LocalPaper[];
   total: number;
@@ -80,6 +90,7 @@ export interface LocalPaperSearchResponse {
   rejected_by_score: number;
   insufficient_evidence: boolean;
   retrieval_run_id?: string | null;
+  query_interpretation?: QueryInterpretation | null;
   trace?: Record<string, unknown>;
 }
 

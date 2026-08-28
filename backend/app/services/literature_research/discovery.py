@@ -98,9 +98,7 @@ class DiscoveryService:
         }
         query_results = await asyncio.gather(
             *(
-                self._fetch_query(
-                    organization_id, project_id, run_id, query, plan
-                )
+                self._fetch_query(organization_id, project_id, run_id, query, plan)
                 for query in plan.queries
             )
         )
@@ -195,8 +193,7 @@ class DiscoveryService:
             candidate_doi_count=len(dois),
             exact_doi_lookup_count=len(lookup_queries),
             exact_doi_match_count=sum(
-                bool(result.pages and result.pages[0].page.records)
-                for result in lookup_results
+                bool(result.pages and result.pages[0].page.records) for result in lookup_results
             ),
             candidate_dois=set(dois),
         )
@@ -241,9 +238,7 @@ class DiscoveryService:
         resolution_records = list(unique_records.values())
         if candidate_dois is not None:
             resolution_records = [
-                record
-                for record in resolution_records
-                if _record_doi(record) in candidate_dois
+                record for record in resolution_records if _record_doi(record) in candidate_dois
             ]
         normalized = [self.normalizer.normalize(record) for record in resolution_records]
         clusters = self.resolver.resolve(normalized)
@@ -458,9 +453,7 @@ class DiscoveryService:
             cursor = page.cursor_out
         if pages and len(pages) >= plan.max_pages_per_query and not failures:
             exhausted = True
-        return _QueryResult(
-            query=query, pages=pages, failures=failures, exhausted=exhausted
-        )
+        return _QueryResult(query=query, pages=pages, failures=failures, exhausted=exhausted)
 
     async def aclose(self) -> None:
         await asyncio.gather(*(adapter.aclose() for adapter in self.adapters.values()))

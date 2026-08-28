@@ -24,10 +24,11 @@ from app.services.literature_research.local_bge_model_servers import (
     RerankRequest,
     _model_device,
 )
+from app.services.literature_research.local_paper_grounded_qa import GroundedClaim
 from app.services.literature_research.local_paper_library import (
     GroundedAnswer,
-    GroundedClaim,
     LocalPaperLibraryService,
+    _allocate_rerank_candidates,
     _bm25_tokens,
     _cap_chunks_per_paper,
     _is_substantive_retrieval_chunk,
@@ -43,6 +44,7 @@ from app.services.literature_research.local_paper_library import (
     extract_structured_source,
     parse_bibtex,
 )
+from app.services.literature_research.local_paper_retrieval import _bm25_rank
 from app.services.literature_research.local_paper_vector_index import (
     BGEEmbeddingHTTPClient,
     LocalPaperVectorChunk,
@@ -147,6 +149,32 @@ def test_figure_boxes_and_rerank_candidates_are_deduplicated_per_paper() -> None
     assert [item.chunk.paper_id for item in selected] == [first_paper, first_paper, second_paper]
 
 
+def test_soft_rerank_quota_reserves_papers_then_allows_extra_relevant_chunks() -> None:
+    first_paper, second_paper, third_paper = uuid4(), uuid4(), uuid4()
+
+    def candidate(paper_id):
+        return SimpleNamespace(chunk=SimpleNamespace(id=uuid4(), paper_id=paper_id))
+
+    # The long first paper owns the highest three RRF slots, but B/C each get
+    # their first candidate before A receives its second and third slot.
+    ranked = [
+        candidate(first_paper),
+        candidate(first_paper),
+        candidate(first_paper),
+        candidate(second_paper),
+        candidate(third_paper),
+    ]
+    selected = _allocate_rerank_candidates(ranked, limit=5, max_per_paper=3)
+
+    assert [item.chunk.paper_id for item in selected] == [
+        first_paper,
+        second_paper,
+        third_paper,
+        first_paper,
+        first_paper,
+    ]
+
+
 def test_short_headers_and_visual_labels_do_not_become_generic_evidence() -> None:
     long_parent = "The parent contains a substantive method explanation. " * 10
     header = SimpleNamespace(
@@ -154,7 +182,9 @@ def test_short_headers_and_visual_labels_do_not_become_generic_evidence() -> Non
         parent=SimpleNamespace(content=long_parent),
     )
     figure_label = SimpleNamespace(
-        chunk=SimpleNamespace(chunk_kind="figure_ocr", content="FIGURE 6. Communication environment."),
+        chunk=SimpleNamespace(
+            chunk_kind="figure_ocr", content="FIGURE 6. Communication environment."
+        ),
         parent=SimpleNamespace(content="FIGURE 6. Communication environment."),
     )
     passage = SimpleNamespace(
@@ -309,7 +339,9 @@ def test_structured_pdf_extraction_preserves_parent_section_paragraph_and_bbox(
     assert "Second paragraph" in section.content
 
 
-def test_structured_source_pages_keep_heading_for_deep_analysis_extractors(tmp_path, monkeypatch) -> None:
+def test_structured_source_pages_keep_heading_for_deep_analysis_extractors(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(
         "app.services.literature_research.local_paper_library.settings.LOCAL_PAPER_REQUIRE_DOCLING",
         False,
@@ -424,6 +456,24 @@ def test_rrf_uses_rank_not_incomparable_raw_scores() -> None:
     assert fused[first][0] > fused[second][0]
     assert fused[first][1] == 0.1
     assert fused[first][2] == 999.0
+
+
+def test_shared_bm25_scores_the_complete_scope_before_applying_top_k() -> None:
+    first, middle, later = uuid4(), uuid4(), uuid4()
+    ranked = _bm25_rank(
+        rows=[
+            (first, "unrelated lexical terms"),
+            (middle, "another unrelated document"),
+            (later, "precise semantic communication evidence"),
+        ],
+        query="semantic communication",
+        scope_key=f"test-{uuid4()}",
+        limit=1,
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0][0] == later
+    assert ranked[0][1] > 0
 
 
 def test_qdrant_dense_query_filters_by_postgres_eligible_paper_ids(monkeypatch) -> None:

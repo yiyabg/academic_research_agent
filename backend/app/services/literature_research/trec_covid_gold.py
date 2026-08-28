@@ -16,9 +16,7 @@ from app.schemas.literature_research.evaluation import (
     GoldSourceObservation,
 )
 
-TREC_COVID_QRELS_URL = (
-    "https://ir.nist.gov/covidSubmit/data/qrels-covid_d5_j0.5-5.txt"
-)
+TREC_COVID_QRELS_URL = "https://ir.nist.gov/covidSubmit/data/qrels-covid_d5_j0.5-5.txt"
 
 
 @dataclass(frozen=True)

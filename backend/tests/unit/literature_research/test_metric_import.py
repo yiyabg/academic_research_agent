@@ -49,8 +49,7 @@ async def test_import_requires_license_attestation_before_writing(tmp_path) -> N
 
 
 @pytest.mark.anyio
-async def test_authorized_import_is_content_addressed_and_passes_facts_to_repository(
-) -> None:
+async def test_authorized_import_is_content_addressed_and_passes_facts_to_repository() -> None:
     object_store = AsyncMock()
     digest = hashlib.sha256(CSV).hexdigest()
     expected_key = f"metric-snapshots/licensed-venue-metrics/2025/{digest}.csv"

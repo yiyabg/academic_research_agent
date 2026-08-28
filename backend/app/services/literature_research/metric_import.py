@@ -90,9 +90,7 @@ class MetricSnapshotImportService:
             try:
                 metric_year = int(raw_year)
             except ValueError as exc:
-                raise ValueError(
-                    f"Metric CSV row {row_number} has invalid metric_year"
-                ) from exc
+                raise ValueError(f"Metric CSV row {row_number} has invalid metric_year") from exc
             try:
                 numeric = Decimal(raw_value)
                 value = int(numeric) if numeric == numeric.to_integral() else float(numeric)

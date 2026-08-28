@@ -54,20 +54,26 @@ async def test_create_organization_also_creates_owner_membership() -> None:
 
 @pytest.mark.anyio
 async def test_non_member_sees_organization_as_not_found() -> None:
-    with patch(
-        "app.services.literature_research.organization.organization_repo.get_membership",
-        new=AsyncMock(return_value=None),
-    ), pytest.raises(NotFoundError):
+    with (
+        patch(
+            "app.services.literature_research.organization.organization_repo.get_membership",
+            new=AsyncMock(return_value=None),
+        ),
+        pytest.raises(NotFoundError),
+    ):
         await ResearchOrganizationService(AsyncMock()).require_member(uuid4(), uuid4())
 
 
 @pytest.mark.anyio
 async def test_only_owner_can_manage_members() -> None:
     membership = SimpleNamespace(role=ResearchOrganizationRole.MEMBER.value)
-    with patch(
-        "app.services.literature_research.organization.organization_repo.get_membership",
-        new=AsyncMock(return_value=membership),
-    ), pytest.raises(AuthorizationError):
+    with (
+        patch(
+            "app.services.literature_research.organization.organization_repo.get_membership",
+            new=AsyncMock(return_value=membership),
+        ),
+        pytest.raises(AuthorizationError),
+    ):
         await ResearchOrganizationService(AsyncMock()).add_member(
             uuid4(), email="member@example.com", requested_by=uuid4()
         )
@@ -85,9 +91,7 @@ async def test_organization_project_creation_requires_current_membership() -> No
         new=AsyncMock(return_value=created),
     ) as create:
         result = await service.create(
-            ResearchProjectCreate(
-                title="Traceable evidence", organization_id=organization_id
-            ),
+            ResearchProjectCreate(title="Traceable evidence", organization_id=organization_id),
             owner_id=owner_id,
             organization_id=organization_id,
         )

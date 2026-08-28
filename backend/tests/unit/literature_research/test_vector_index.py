@@ -22,8 +22,7 @@ class FixedEmbedder:
 def test_project_llm_key_does_not_switch_research_embeddings_to_openai() -> None:
     with (
         patch(
-            "app.services.literature_research.vector_index.settings."
-            "RESEARCH_EMBEDDING_PROVIDER",
+            "app.services.literature_research.vector_index.settings.RESEARCH_EMBEDDING_PROVIDER",
             "local",
         ),
         patch(

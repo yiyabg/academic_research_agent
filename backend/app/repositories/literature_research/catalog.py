@@ -30,9 +30,7 @@ async def list_candidate_rows(
     db: AsyncSession, *, run_id: UUID, skip: int, limit: int
 ) -> tuple[list[CandidateRow], int]:
     total = int(
-        await db.scalar(
-            select(func.count(ResearchWork.id)).where(ResearchWork.run_id == run_id)
-        )
+        await db.scalar(select(func.count(ResearchWork.id)).where(ResearchWork.run_id == run_id))
         or 0
     )
     result = await db.execute(
@@ -101,9 +99,7 @@ async def get_candidate_row(
 async def list_constraints_for_works(
     db: AsyncSession, *, run_id: UUID, work_ids: list[UUID]
 ) -> dict[UUID, list[ResearchConstraintEvaluation]]:
-    grouped: dict[UUID, list[ResearchConstraintEvaluation]] = {
-        work_id: [] for work_id in work_ids
-    }
+    grouped: dict[UUID, list[ResearchConstraintEvaluation]] = {work_id: [] for work_id in work_ids}
     if not work_ids:
         return grouped
     result = await db.execute(
@@ -128,9 +124,7 @@ async def get_work(db: AsyncSession, *, run_id: UUID, work_id: UUID) -> Research
     )
 
 
-async def list_versions(
-    db: AsyncSession, *, work_id: UUID
-) -> list[ResearchWorkVersion]:
+async def list_versions(db: AsyncSession, *, work_id: UUID) -> list[ResearchWorkVersion]:
     result = await db.execute(
         select(ResearchWorkVersion)
         .where(ResearchWorkVersion.work_id == work_id)

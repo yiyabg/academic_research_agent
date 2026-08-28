@@ -10,9 +10,7 @@ def research_collection_name(organization_id: UUID | None, project_id: UUID) -> 
     return f"research_{digest}"
 
 
-def research_memory_collection_name(
-    organization_id: UUID | None, project_id: UUID
-) -> str:
+def research_memory_collection_name(organization_id: UUID | None, project_id: UUID) -> str:
     tenant = str(organization_id) if organization_id else "personal"
     digest = hashlib.sha256(f"memory:{tenant}:{project_id}".encode()).hexdigest()[:24]
     return f"research_memory_{digest}"

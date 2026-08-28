@@ -44,8 +44,7 @@ async def test_llm_budget_stage_failure_is_terminal_not_resumed_in_a_loop() -> N
             db_context,
         ),
         patch(
-            "app.worker.tasks.literature_research_tasks."
-            "ResearchWorkflowService.transition",
+            "app.worker.tasks.literature_research_tasks.ResearchWorkflowService.transition",
             new=AsyncMock(),
         ) as transition,
     ):

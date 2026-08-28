@@ -1,4 +1,5 @@
 """Provider boundary for durable local-paper analysis stages."""
+# ruff: noqa: RUF001 - User-facing Chinese error summaries intentionally use full-width punctuation.
 
 from __future__ import annotations
 
@@ -38,11 +39,15 @@ def normalize_model_error(exc: Exception) -> ModelGatewayError:
             raw_summary=raw,
         )
     if isinstance(exc, TimeoutError):
-        return ModelGatewayError("CLIENT_TIMEOUT", "模型调用超过本地阶段时间预算。", raw_summary=raw)
+        return ModelGatewayError(
+            "CLIENT_TIMEOUT", "模型调用超过本地阶段时间预算。", raw_summary=raw
+        )
     if status_code in {401, 403}:
         return ModelGatewayError("PROVIDER_AUTH_ERROR", "模型服务认证失败。", raw_summary=raw)
     if status_code == 429:
-        return ModelGatewayError("PROVIDER_RATE_LIMITED", "模型服务当前限流，请稍后重试。", raw_summary=raw)
+        return ModelGatewayError(
+            "PROVIDER_RATE_LIMITED", "模型服务当前限流，请稍后重试。", raw_summary=raw
+        )
     if status_code and int(status_code) >= 500:
         return ModelGatewayError("PROVIDER_UNAVAILABLE", "上游模型服务暂不可用。", raw_summary=raw)
     return ModelGatewayError("INVALID_MODEL_OUTPUT", "模型未返回可用的分析结果。", raw_summary=raw)
@@ -55,7 +60,9 @@ class PaperAnalysisModelGateway:
     def endpoint_hash() -> str:
         return hashlib.sha256(settings.LLM_BASE_URL.rstrip("/").encode()).hexdigest()[:16]
 
-    async def complete(self, *, system_prompt: str, user_prompt: str, max_output_tokens: int) -> ModelStageResult:
+    async def complete(
+        self, *, system_prompt: str, user_prompt: str, max_output_tokens: int
+    ) -> ModelStageResult:
         started = time.monotonic()
         agent: Agent[str] = Agent(
             model=build_local_paper_analysis_model(
@@ -80,11 +87,15 @@ class PaperAnalysisModelGateway:
         content = response.output.strip()
         if not content:
             raise ModelGatewayError("INVALID_MODEL_OUTPUT", "模型返回了空结果。")
-        return ModelStageResult(content=content, latency_ms=round((time.monotonic() - started) * 1000))
+        return ModelStageResult(
+            content=content, latency_ms=round((time.monotonic() - started) * 1000)
+        )
 
     def _background_client(self, *, timeout_seconds: float) -> AsyncOpenAI:
         if selected_llm_provider() != "openai_compatible":
-            raise ModelGatewayError("BACKGROUND_NOT_SUPPORTED", "当前模型提供商不支持后台分析模式。")
+            raise ModelGatewayError(
+                "BACKGROUND_NOT_SUPPORTED", "当前模型提供商不支持后台分析模式。"
+            )
         return AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.LLM_BASE_URL.rstrip("/"),

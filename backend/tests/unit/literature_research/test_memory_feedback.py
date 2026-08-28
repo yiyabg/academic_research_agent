@@ -26,23 +26,18 @@ async def test_relevance_feedback_persists_cross_run_paper_identity_and_indexes_
 
     with (
         patch(
-            "app.api.routes.v1.literature_research.memory.catalog_repository."
-            "get_candidate_row",
+            "app.api.routes.v1.literature_research.memory.catalog_repository.get_candidate_row",
             new=AsyncMock(return_value=(work, version, None, None, None)),
         ),
         patch(
-            "app.api.routes.v1.literature_research.memory.memory_repository."
-            "create_feedback",
+            "app.api.routes.v1.literature_research.memory.memory_repository.create_feedback",
             new=AsyncMock(return_value=feedback_row),
         ),
         patch(
-            "app.api.routes.v1.literature_research.memory.memory_repository."
-            "create_project_memory",
+            "app.api.routes.v1.literature_research.memory.memory_repository.create_project_memory",
             new=AsyncMock(return_value=memory_row),
         ) as create_memory,
-        patch(
-            "app.api.routes.v1.literature_research.memory._enqueue_memory_index"
-        ) as enqueue,
+        patch("app.api.routes.v1.literature_research.memory._enqueue_memory_index") as enqueue,
     ):
         accepted = await create_feedback(
             run_id=run_id,

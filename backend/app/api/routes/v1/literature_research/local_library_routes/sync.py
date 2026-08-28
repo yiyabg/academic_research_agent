@@ -55,7 +55,15 @@ async def _owned(run_id: UUID, owner_id: UUID) -> LocalPaperSyncRun:
 async def _replay(run_id: UUID, owner_id: UUID, after: int) -> list[dict[str, object]]:
     await _owned(run_id, owner_id)
     async with get_db_context() as db:
-        rows = (await db.scalars(select(LocalPaperSyncEvent).where(LocalPaperSyncEvent.sync_run_id == run_id, LocalPaperSyncEvent.sequence > after).order_by(LocalPaperSyncEvent.sequence))).all()
+        rows = (
+            await db.scalars(
+                select(LocalPaperSyncEvent)
+                .where(
+                    LocalPaperSyncEvent.sync_run_id == run_id, LocalPaperSyncEvent.sequence > after
+                )
+                .order_by(LocalPaperSyncEvent.sequence)
+            )
+        ).all()
     return [dict(row.payload_json) for row in rows]
 
 
@@ -69,12 +77,19 @@ async def sync_local_library(db: DBSession, current_admin: CurrentAppAdmin) -> o
     run = await LocalPaperLibraryService(db).request_sync(owner_id=current_admin.id)
     await db.commit()
     if run.status == "QUEUED":
-        sync_local_paper_library.apply_async(args=(str(run.library_id), str(run.id)), queue="research-cpu")
+        sync_local_paper_library.apply_async(
+            args=(str(run.library_id), str(run.id)), queue="research-cpu"
+        )
     return LocalLibrarySyncAccepted(sync_run_id=run.id, status=run.status)
 
 
 @router.get("/sync/{sync_run_id}/stream", response_class=EventSourceResponse)
-async def stream_sync(sync_run_id: UUID, request: Request, current_admin: CurrentAppAdmin, after_sequence: int = Query(default=0, ge=0)) -> AsyncIterator[ServerSentEvent]:
+async def stream_sync(
+    sync_run_id: UUID,
+    request: Request,
+    current_admin: CurrentAppAdmin,
+    after_sequence: int = Query(default=0, ge=0),
+) -> AsyncIterator[ServerSentEvent]:
     initial = _payload(await _owned(sync_run_id, current_admin.id))
     redis: RedisClient = request.state.redis
     pubsub = redis.raw.pubsub()
@@ -110,7 +125,12 @@ async def stream_sync(sync_run_id: UUID, request: Request, current_admin: Curren
 
 
 @router.websocket("/sync/{sync_run_id}/stream")
-async def stream_sync_ws(websocket: WebSocket, sync_run_id: UUID, user: CurrentUserWS, after_sequence: int = Query(default=0, ge=0)) -> None:
+async def stream_sync_ws(
+    websocket: WebSocket,
+    sync_run_id: UUID,
+    user: CurrentUserWS,
+    after_sequence: int = Query(default=0, ge=0),
+) -> None:
     try:
         initial = _payload(await _owned(sync_run_id, user.id))
     except HTTPException:

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { analysisStageLabel } from "./local-paper-library-workbench";
-import type { LocalPaperAnalysisJob } from "@/types/literature-research";
+import {
+  analysisStageLabel,
+  buildLocalPaperSearchRequest,
+  queryInterpretationChips,
+} from "./local-paper-library-workbench";
+import type { LocalPaperAnalysisJob, QueryInterpretation } from "@/types/literature-research";
 
 const job = (overrides: Partial<LocalPaperAnalysisJob>): LocalPaperAnalysisJob =>
   ({
@@ -41,5 +45,49 @@ describe("analysisStageLabel", () => {
         "处理中",
       ),
     ).toBe("模型正在分析");
+  });
+});
+
+describe("local-paper search controls", () => {
+  it("sends explicit advanced filters and normalized keyword lists", () => {
+    expect(
+      buildLocalPaperSearchRequest("semantic communication", 10, {
+        year_from: "2024",
+        year_to: "2026",
+        author: "张三",
+        doi: "10.1000/example",
+        venue: "IEEE TWC",
+        bibtex_type: "article",
+        keywords: "semantic communication, VLA，",
+      }),
+    ).toEqual({
+      query: "semantic communication",
+      limit: 10,
+      year_from: 2024,
+      year_to: 2026,
+      author: "张三",
+      doi: "10.1000/example",
+      venue: "IEEE TWC",
+      bibtex_type: "article",
+      keywords: ["semantic communication", "VLA"],
+    });
+  });
+
+  it("renders semantic, filter-source, and warning chips from the actual interpretation", () => {
+    const interpretation: QueryInterpretation = {
+      raw_query: "2026年发表的 semantic communication",
+      semantic_query: "semantic communication",
+      effective_filters: { year_from: 2026, year_to: 2026, venue: "IEEE TWC" },
+      filter_sources: { year_from: "parsed", year_to: "parsed", venue: "explicit" },
+      warnings: ["年份范围无效已忽略"],
+    };
+
+    expect(queryInterpretationChips(interpretation)).toEqual([
+      { key: "semantic", label: "语义：semantic communication", kind: "semantic" },
+      { key: "filter-year_from", label: "year_from: 2026（parsed）", kind: "filter" },
+      { key: "filter-year_to", label: "year_to: 2026（parsed）", kind: "filter" },
+      { key: "filter-venue", label: "venue: IEEE TWC（explicit）", kind: "filter" },
+      { key: "warning-0", label: "年份范围无效已忽略", kind: "warning" },
+    ]);
   });
 });

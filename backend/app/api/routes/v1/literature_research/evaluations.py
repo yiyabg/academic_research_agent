@@ -56,9 +56,7 @@ async def evaluate_run(
     current_user: CurrentUser,
     service: ResearchEvaluationSvc,
 ) -> object:
-    report = await service.evaluate(
-        owner_id=current_user.id, run_id=run_id, dataset_id=dataset_id
-    )
+    report = await service.evaluate(owner_id=current_user.id, run_id=run_id, dataset_id=dataset_id)
     await service.db.commit()
     return report
 

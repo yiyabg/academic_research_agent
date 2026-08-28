@@ -65,6 +65,7 @@ async def client_with_mock_service(
     mock_db_session,
 ) -> AsyncClient:
     """Client with mocked user service."""
+
     async def override_user_service() -> MagicMock:
         return mock_user_service
 
@@ -190,6 +191,7 @@ async def test_get_current_user(
     mock_user_service: MagicMock,
 ):
     """Test getting current user info."""
+
     # Override get_current_user to return mock user
     async def override_current_user() -> MockUser:
         return mock_user

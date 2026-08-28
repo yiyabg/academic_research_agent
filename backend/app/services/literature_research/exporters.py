@@ -208,12 +208,17 @@ def render_catalog_opml(report: CatalogResearchReport) -> RenderedArtifact:
     ET.SubElement(head, "title").text = _CONTROL.sub("", report.title)
     body = ET.SubElement(root, "body")
     notice = ET.SubElement(body, "outline", text="Metadata-only catalog; no PDF or deep analysis")
-    notice.set("_note", f"Protocol {report.protocol_hash}; strict {report.strict_count}/{report.target_count}")
+    notice.set(
+        "_note",
+        f"Protocol {report.protocol_hash}; strict {report.strict_count}/{report.target_count}",
+    )
     for paper in report.papers:
         node = ET.SubElement(body, "outline", text=f"{paper.rank}. {_CONTROL.sub('', paper.title)}")
         node.set("_note", f"relevance={paper.relevance_score:.4f}; type={paper.document_type}")
         ET.SubElement(node, "outline", text=f"DOI: {paper.doi or 'not_reported'}")
-        ET.SubElement(node, "outline", text=f"Venue: {_CONTROL.sub('', paper.venue or 'not_reported')}")
+        ET.SubElement(
+            node, "outline", text=f"Venue: {_CONTROL.sub('', paper.venue or 'not_reported')}"
+        )
     xml = ET.tostring(root, encoding="unicode", xml_declaration=True)
     return _artifact(ArtifactFormat.OPML, "research_catalog.opml", "text/x-opml", xml)
 

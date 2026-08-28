@@ -294,7 +294,9 @@ class LocalPaperVectorIndex:
         """
         if not chunk_ids:
             return {}
-        point_ids = [hashlib.sha256(str(chunk_id).encode()).hexdigest()[:32] for chunk_id in chunk_ids]
+        point_ids = [
+            hashlib.sha256(str(chunk_id).encode()).hexdigest()[:32] for chunk_id in chunk_ids
+        ]
         points = await self.client.retrieve(
             collection_name=collection,
             ids=point_ids,

@@ -86,7 +86,8 @@ def build_llm_provider() -> OpenAIProvider | DeepSeekProvider:
 
 
 def build_local_paper_analysis_model(
-    *, timeout_seconds: float | None = None,
+    *,
+    timeout_seconds: float | None = None,
 ) -> OpenAIResponsesModel:
     """Create the bounded, no-retry model for one local-paper stage."""
     timeout = timeout_seconds or settings.LOCAL_PAPER_ANALYSIS_STAGE_TIMEOUT_SECONDS
@@ -96,8 +97,8 @@ def build_local_paper_analysis_model(
     if not api_key:
         raise RuntimeError(f"{selected_llm_credential_name()} is not configured")
     if provider == "deepseek":
-        # DeepSeekProvider owns its endpoint configuration; the outer timeout
-        # in PaperMindmapService remains the authoritative job budget.
+        # DeepSeekProvider owns its endpoint configuration; the analysis
+        # orchestrator's outer stage timeout remains the authoritative budget.
         return OpenAIResponsesModel(settings.AI_MODEL, provider=DeepSeekProvider(api_key=api_key))
     client = AsyncOpenAI(
         api_key=api_key,

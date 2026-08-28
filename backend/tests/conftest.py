@@ -76,6 +76,7 @@ async def client(
     Uses HTTPX AsyncClient with ASGITransport instead of Starlette's TestClient.
     This allows proper async testing without thread pool overhead.
     """
+
     async def override_redis() -> MagicMock:
         return mock_redis
 

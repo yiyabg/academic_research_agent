@@ -31,9 +31,7 @@ async def test_unpaywall_candidate_carries_oa_license_provenance(
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    candidate = await UnpaywallClient(client).candidate(
-        version_id=uuid4(), doi="10.1000/agent"
-    )
+    candidate = await UnpaywallClient(client).candidate(version_id=uuid4(), doi="10.1000/agent")
     await client.aclose()
     assert candidate is not None
     assert candidate.license_decision == LicenseDecision.ALLOWED
@@ -46,12 +44,8 @@ async def test_unpaywall_closed_record_returns_no_candidate(
 ) -> None:
     monkeypatch.setattr(settings, "CROSSREF_MAILTO", "researcher@example.org")
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json={"is_oa": False})
-        )
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"is_oa": False}))
     )
-    candidate = await UnpaywallClient(client).candidate(
-        version_id=uuid4(), doi="10.1000/closed"
-    )
+    candidate = await UnpaywallClient(client).candidate(version_id=uuid4(), doi="10.1000/closed")
     await client.aclose()
     assert candidate is None

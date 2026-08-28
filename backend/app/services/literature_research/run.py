@@ -75,13 +75,8 @@ class ResearchRunService:
                     },
                 )
         project = await self.project_service.get_owned(request.project_id, owner_id)
-        if (
-            active_organization_id is not None
-            and project.organization_id != active_organization_id
-        ):
-            raise ValidationError(
-                message="Project does not belong to X-Research-Organization-ID"
-            )
+        if active_organization_id is not None and project.organization_id != active_organization_id:
+            raise ValidationError(message="Project does not belong to X-Research-Organization-ID")
         version = await self.protocol_service.get(
             request.project_id, request.protocol_version, owner_id
         )

@@ -86,9 +86,7 @@ class RelevanceFacetJudge:
         return judgements
 
     @staticmethod
-    def _payload(
-        protocol: ResearchProtocol, tasks: list[RelevanceJudgementTask]
-    ) -> dict[str, Any]:
+    def _payload(protocol: ResearchProtocol, tasks: list[RelevanceJudgementTask]) -> dict[str, Any]:
         return {
             "topic": protocol.topic,
             "topic_definition": protocol.topic_definition,
@@ -126,8 +124,7 @@ class RelevanceFacetJudge:
         expected_facets = {
             item.facet_id
             for item in (
-                protocol.topic_model.must_have_facets
-                + protocol.topic_model.should_have_facets
+                protocol.topic_model.must_have_facets + protocol.topic_model.should_have_facets
             )
         }
         tasks_by_id = {task.work_id: task for task in tasks}
@@ -142,9 +139,7 @@ class RelevanceFacetJudge:
             }
             cited = set(judgement.evidence_ids)
             cited.update(
-                evidence_id
-                for facet in judgement.facets
-                for evidence_id in facet.evidence_ids
+                evidence_id for facet in judgement.facets for evidence_id in facet.evidence_ids
             )
             if unknown := cited - allowed_evidence:
                 raise RelevanceJudgementError(
@@ -179,9 +174,7 @@ def apply_facet_judgement(
     ]:
         decision = RelevanceDecision.FAIL
         reasons.extend(f"FACET_LLM_NOT_SUPPORTED:{item}" for item in unsupported)
-    elif uncertain := [
-        item.facet_id for item in must if item.status == FacetStatus.UNCERTAIN
-    ]:
+    elif uncertain := [item.facet_id for item in must if item.status == FacetStatus.UNCERTAIN]:
         decision = RelevanceDecision.REVIEW
         reasons.extend(f"FACET_LLM_UNCERTAIN:{item}" for item in uncertain)
     elif judgement.centrality != Centrality.CENTRAL:
@@ -189,10 +182,10 @@ def apply_facet_judgement(
         reasons.append(f"FACET_LLM_CENTRALITY:{judgement.centrality.value}")
     else:
         weight = sum(item.weight for item in protocol.topic_model.must_have_facets)
-        threshold = sum(
-            item.minimum_score * item.weight
-            for item in protocol.topic_model.must_have_facets
-        ) / weight
+        threshold = (
+            sum(item.minimum_score * item.weight for item in protocol.topic_model.must_have_facets)
+            / weight
+        )
         if judgement.score < threshold:
             decision = RelevanceDecision.FAIL
             reasons.append("FACET_LLM_SCORE_BELOW_PROTOCOL_FLOOR")

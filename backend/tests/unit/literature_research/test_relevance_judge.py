@@ -31,21 +31,25 @@ from app.services.literature_research.relevance_judge import (
 
 
 def protocol():  # type: ignore[no-untyped-def]
-    return ProtocolCompilerService().compile(
-        ProtocolCompileRequest(
-            topic="evidence grounded research agents",
-            as_of_date=date(2026, 8, 22),
-            allowed_types=[DocumentType.JOURNAL_ARTICLE],
-            must_have_facets=[
-                TopicFacet(
-                    facet_id="grounding",
-                    name="evidence grounding",
-                    description="Claims are grounded in traceable evidence.",
-                    minimum_score=0.6,
-                )
-            ],
+    return (
+        ProtocolCompilerService()
+        .compile(
+            ProtocolCompileRequest(
+                topic="evidence grounded research agents",
+                as_of_date=date(2026, 8, 22),
+                allowed_types=[DocumentType.JOURNAL_ARTICLE],
+                must_have_facets=[
+                    TopicFacet(
+                        facet_id="grounding",
+                        name="evidence grounding",
+                        description="Claims are grounded in traceable evidence.",
+                        minimum_score=0.6,
+                    )
+                ],
+            )
         )
-    ).protocol
+        .protocol
+    )
 
 
 def judgement(
@@ -123,18 +127,12 @@ async def test_unknown_evidence_triggers_one_targeted_batch_repair() -> None:
         async def run(self, payload: dict[str, object]) -> FacetJudgementBatch:
             self.call_count += 1
             evidence_id = (
-                "INVENTED"
-                if self.call_count == 1
-                else str(task.evidence[0]["evidence_id"])
+                "INVENTED" if self.call_count == 1 else str(task.evidence[0]["evidence_id"])
             )
-            return FacetJudgementBatch(
-                judgements=[judgement(task.work_id, evidence_id)]
-            )
+            return FacetJudgementBatch(judgements=[judgement(task.work_id, evidence_id)])
 
     expert = RepairingExpert()
-    result = await RelevanceFacetJudge(expert).judge(
-        protocol=protocol(), tasks=[task]
-    )
+    result = await RelevanceFacetJudge(expert).judge(protocol=protocol(), tasks=[task])
 
     assert expert.call_count == 2
     assert result[0].evidence_ids == [task.evidence[0]["evidence_id"]]
@@ -208,8 +206,7 @@ async def test_search_only_relevance_never_constructs_or_calls_llm_expert() -> N
             new=AsyncMock(return_value=[(work, None, None)]),
         ),
         patch(
-            "app.services.literature_research.pipeline_stages."
-            "get_research_embedding_provider",
+            "app.services.literature_research.pipeline_stages.get_research_embedding_provider",
             return_value=(MagicMock(), 384, "embedding-fixture"),
         ),
         patch(
@@ -270,8 +267,7 @@ async def test_full_research_persists_facet_judgement_and_usage_progress() -> No
             new=AsyncMock(return_value=[(work, None, None)]),
         ),
         patch(
-            "app.services.literature_research.pipeline_stages."
-            "get_research_embedding_provider",
+            "app.services.literature_research.pipeline_stages.get_research_embedding_provider",
             return_value=(MagicMock(), 384, "embedding-fixture"),
         ),
         patch(

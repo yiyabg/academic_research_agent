@@ -77,6 +77,7 @@ async def auth_client(
     mock_db_session,
 ) -> AsyncClient:
     """Client with authenticated regular user."""
+
     async def override_current_user() -> MockUser:
         return mock_user
 
@@ -111,6 +112,7 @@ async def superuser_client(
     mock_db_session,
 ) -> AsyncClient:
     """Client with authenticated superuser."""
+
     async def override_superuser() -> MockUser:
         return mock_superuser
 

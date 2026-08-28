@@ -46,7 +46,9 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="RESTRICT"),
             nullable=False,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("project_id", "name", "version", name="uq_eval_dataset_version"),
     )

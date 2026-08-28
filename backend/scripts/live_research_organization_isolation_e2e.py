@@ -53,9 +53,7 @@ async def create_clients(base_url: str) -> dict[str, tuple[httpx.AsyncClient, di
                 )
             )
             client = httpx.AsyncClient(base_url=base_url, timeout=60)
-            client.headers["Authorization"] = (
-                f"Bearer {create_access_token(subject=str(user.id))}"
-            )
+            client.headers["Authorization"] = f"Bearer {create_access_token(subject=str(user.id))}"
             result[label] = (client, {"id": str(user.id), "email": user.email})
     for label, (client, expected_user) in result.items():
         observed_user = await checked_object(await client.get("/api/v1/auth/me"))
@@ -93,8 +91,7 @@ async def make_validate_only_run(
     )
     approved = await checked_object(
         await client.post(
-            f"/api/v1/research/projects/{project_id}/protocols/"
-            f"{protocol['version']}:approve",
+            f"/api/v1/research/projects/{project_id}/protocols/{protocol['version']}:approve",
             headers=headers,
             json={"protocol_hash": protocol["protocol_hash"]},
         )
@@ -158,8 +155,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             json={"email": outsider_user["email"]},
         )
         remove_owner = await owner_a.delete(
-            f"/api/v1/research/organizations/{organization_a['id']}/members/"
-            f"{owner_a_user['id']}"
+            f"/api/v1/research/organizations/{organization_a['id']}/members/{owner_a_user['id']}"
         )
         if member_manage.status_code != 403 or remove_owner.status_code != 403:
             raise RuntimeError(
@@ -198,24 +194,16 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             raise RuntimeError(f"Organization A project was not scoped: {project_a}")
         if project_b.get("organization_id") != organization_b["id"]:
             raise RuntimeError(f"Organization B project was not scoped: {project_b}")
-        run_a = await make_validate_only_run(
-            member_a, project_a["id"], organization_a["id"]
-        )
+        run_a = await make_validate_only_run(member_a, project_a["id"], organization_a["id"])
 
-        owner_a_project = await owner_a.get(
-            f"/api/v1/research/projects/{project_a['id']}"
-        )
+        owner_a_project = await owner_a.get(f"/api/v1/research/projects/{project_a['id']}")
         owner_a_run = await owner_a.get(f"/api/v1/research/runs/{run_a['id']}")
-        member_personal = await member_a.get(
-            f"/api/v1/research/projects/{personal_project['id']}"
-        )
+        member_personal = await member_a.get(f"/api/v1/research/projects/{personal_project['id']}")
         cross_org_probes = {
             "owner_b_to_project_a": await owner_b.get(
                 f"/api/v1/research/projects/{project_a['id']}"
             ),
-            "owner_b_to_run_a": await owner_b.get(
-                f"/api/v1/research/runs/{run_a['id']}"
-            ),
+            "owner_b_to_run_a": await owner_b.get(f"/api/v1/research/runs/{run_a['id']}"),
             "member_a_to_project_b": await member_a.get(
                 f"/api/v1/research/projects/{project_b['id']}"
             ),
@@ -229,9 +217,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
                 "/api/v1/research/projects", headers=org_a_headers
             ),
         }
-        cross_statuses = {
-            name: response.status_code for name, response in cross_org_probes.items()
-        }
+        cross_statuses = {name: response.status_code for name, response in cross_org_probes.items()}
         if owner_a_project.status_code != 200 or owner_a_run.status_code != 200:
             raise RuntimeError("Organization owner could not access member-created resources")
         if member_personal.status_code != 404:
@@ -239,20 +225,15 @@ async def main(base_url: str, frontend_base_url: str) -> None:
         if any(status != 404 for status in cross_statuses.values()):
             raise RuntimeError(f"Cross-organization resource leaked: {cross_statuses}")
 
-        member_orgs = await checked_list(
-            await member_a.get("/api/v1/research/organizations")
-        )
-        outsider_orgs = await checked_list(
-            await outsider.get("/api/v1/research/organizations")
-        )
+        member_orgs = await checked_list(await member_a.get("/api/v1/research/organizations"))
+        outsider_orgs = await checked_list(await outsider.get("/api/v1/research/organizations"))
         if organization_a["id"] not in {item["id"] for item in member_orgs}:
             raise RuntimeError("Organization membership was not discoverable by its member")
         if organization_a["id"] in {item["id"] for item in outsider_orgs}:
             raise RuntimeError("Organization membership list leaked to outsider")
 
         removed = await owner_a.delete(
-            f"/api/v1/research/organizations/{organization_a['id']}/members/"
-            f"{member_a_user['id']}"
+            f"/api/v1/research/organizations/{organization_a['id']}/members/{member_a_user['id']}"
         )
         if removed.status_code != 204:
             raise RuntimeError(f"Owner could not revoke membership: {removed.status_code}")
@@ -260,9 +241,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             "project": (
                 await member_a.get(f"/api/v1/research/projects/{project_a['id']}")
             ).status_code,
-            "run": (
-                await member_a.get(f"/api/v1/research/runs/{run_a['id']}")
-            ).status_code,
+            "run": (await member_a.get(f"/api/v1/research/runs/{run_a['id']}")).status_code,
             "active_org_list": (
                 await member_a.get("/api/v1/research/projects", headers=org_a_headers)
             ).status_code,
@@ -296,8 +275,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             raise RuntimeError("Next.js proxy dropped organization context for its owner")
         if proxied_outsider.status_code != 404:
             raise RuntimeError(
-                "Next.js proxy bypassed organization isolation: "
-                f"{proxied_outsider.status_code}"
+                f"Next.js proxy bypassed organization isolation: {proxied_outsider.status_code}"
             )
 
         print(

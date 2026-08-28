@@ -24,9 +24,7 @@ class ResearchProjectService:
         organization_id: UUID | None = None,
     ) -> ResearchProject:
         if organization_id is not None:
-            await self.organizations.require_member(
-                organization_id, owner_id, lock=True
-            )
+            await self.organizations.require_member(organization_id, owner_id, lock=True)
         return await project_repo.create(
             self.db,
             owner_id=owner_id,

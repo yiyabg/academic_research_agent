@@ -62,8 +62,9 @@ async def list_owned(
     if organization_id is not None:
         query = query.where(ResearchProject.organization_id == organization_id)
     result = await db.execute(
-        query
-        .order_by(ResearchProject.updated_at.desc().nullslast(), ResearchProject.created_at.desc())
+        query.order_by(
+            ResearchProject.updated_at.desc().nullslast(), ResearchProject.created_at.desc()
+        )
         .offset(skip)
         .limit(limit)
     )

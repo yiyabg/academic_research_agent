@@ -28,9 +28,7 @@ async def create_project(
             message="Body and X-Research-Organization-ID must identify the same organization"
         )
     organization_id = active_organization_id or body.organization_id
-    project = await service.create(
-        body, owner_id=current_user.id, organization_id=organization_id
-    )
+    project = await service.create(body, owner_id=current_user.id, organization_id=organization_id)
     await service.db.commit()
     return project
 

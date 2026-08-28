@@ -160,21 +160,15 @@ class ArtifactService:
                     row = by_format.get(format_.value)
                     if row is None or row.sha256 != expected_hash:
                         errors.append(f"manifest hash mismatch: {format_.value}")
-                expected_source_hashes = (
-                    await discovery_repository.list_source_snapshot_hashes(
-                        self.db, run_id=run_id
-                    )
+                expected_source_hashes = await discovery_repository.list_source_snapshot_hashes(
+                    self.db, run_id=run_id
                 )
-                if manifest.source_snapshot_hashes != sorted(
-                    set(expected_source_hashes)
-                ):
+                if manifest.source_snapshot_hashes != sorted(set(expected_source_hashes)):
                     errors.append("manifest source snapshot provenance mismatch")
                 expected_metric_ids = await quality_repository.list_used_metric_snapshot_ids(
                     self.db, run_id=run_id
                 )
-                if manifest.metric_snapshot_ids != sorted(
-                    set(expected_metric_ids), key=str
-                ):
+                if manifest.metric_snapshot_ids != sorted(set(expected_metric_ids), key=str):
                     errors.append("manifest metric snapshot provenance mismatch")
             except Exception as exc:
                 errors.append(f"run_manifest.json: invalid manifest ({type(exc).__name__})")
@@ -199,12 +193,9 @@ class ArtifactService:
                     await collect_metric_snapshot_audit_rows(self.db, run_id=run_id)
                 ).data
                 if payloads.get(ArtifactFormat.VENUE_METRICS_CSV.value) != expected_metrics:
-                    errors.append(
-                        "venue_metrics_snapshot.csv: authoritative ledger mismatch"
-                    )
+                    errors.append("venue_metrics_snapshot.csv: authoritative ledger mismatch")
             except Exception as exc:
                 errors.append(
-                    "audit CSVs: could not verify authoritative ledgers "
-                    f"({type(exc).__name__})"
+                    f"audit CSVs: could not verify authoritative ledgers ({type(exc).__name__})"
                 )
         return sorted(set(errors))

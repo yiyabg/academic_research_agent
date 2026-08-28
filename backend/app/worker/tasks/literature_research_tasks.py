@@ -175,16 +175,14 @@ async def _prepare_initial_analysis_shards(run_id: UUID) -> list[tuple[str, str]
         if RunState(run.state) != RunState.ANALYZING:
             return []
         pinned_model = str(run.progress_json.get("analysis_model") or settings.AI_MODEL)
-        pinned_provider = str(
-            run.progress_json.get("analysis_provider") or selected_llm_provider()
-        )
+        pinned_provider = str(run.progress_json.get("analysis_provider") or selected_llm_provider())
         pinned_identity = str(
             run.progress_json.get("analysis_model_identifier")
             or selected_llm_model_identifier(pinned_model)
         )
-        rows = (
-            await evidence_repo.list_analysis_ready_versions(db, run_id=run.id)
-        )[: run.target_count]
+        rows = (await evidence_repo.list_analysis_ready_versions(db, run_id=run.id))[
+            : run.target_count
+        ]
         dispatch: list[tuple[str, str]] = []
         for work, version in rows:
             task, _ = await analysis_repo.get_or_create_initial_analysis_task(
@@ -246,9 +244,7 @@ async def _mark_analysis_shard_failed(
             return None
         attempt_count = task.attempt_count + 1
         previous_history = (
-            task.error_json.get("attempt_history", [])
-            if isinstance(task.error_json, dict)
-            else []
+            task.error_json.get("attempt_history", []) if isinstance(task.error_json, dict) else []
         )
         history = list(previous_history) if isinstance(previous_history, list) else []
         attempt_error: dict[str, object] = {
@@ -324,9 +320,7 @@ def analyze_research_paper(self: Any, task_execution_id: str) -> dict[str, objec
             task.attempt_count += 1
             task.started_at = datetime.now(UTC)
             work_id = UUID(task.shard_key)
-            candidate = await catalog_repo.get_candidate_row(
-                db, run_id=run.id, work_id=work_id
-            )
+            candidate = await catalog_repo.get_candidate_row(db, run_id=run.id, work_id=work_id)
             if candidate is None:
                 raise RuntimeError("Selected paper version does not exist")
             work, version, _, eligibility, relevance = candidate
@@ -372,14 +366,10 @@ def analyze_research_paper(self: Any, task_execution_id: str) -> dict[str, objec
             _mark_analysis_shard_failed(execution_id, exc, terminal=terminal)
         )
         if terminal and failed_run_id is not None:
-            finalize_research_analysis.apply_async(
-                args=(str(failed_run_id),), queue="research-llm"
-            )
+            finalize_research_analysis.apply_async(args=(str(failed_run_id),), queue="research-llm")
             raise
         raise self.retry(exc=exc, countdown=2 ** (self.request.retries + 1)) from exc
-    finalize_research_analysis.apply_async(
-        args=(str(result["run_id"]),), queue="research-llm"
-    )
+    finalize_research_analysis.apply_async(args=(str(result["run_id"]),), queue="research-llm")
     return result
 
 
@@ -445,9 +435,7 @@ async def _mark_stage_failed(run_id: UUID, expected_state: RunState, exc: Except
             "error_type": type(exc).__name__,
             "error_code": "LLM_BUDGET_EXCEEDED" if budget_exceeded else "STAGE_FAILED",
             "message": str(exc)[:2000],
-            "retryable": (
-                isinstance(exc, TransientResearchStageError) and not budget_exceeded
-            ),
+            "retryable": (isinstance(exc, TransientResearchStageError) and not budget_exceeded),
             "failed_at": datetime.now(UTC).isoformat(),
         }
         if (usage := attached_usage(exc)) is not None:
@@ -457,9 +445,7 @@ async def _mark_stage_failed(run_id: UUID, expected_state: RunState, exc: Except
             owner_id=run.owner_id,
             expected_state=expected_state,
             expected_version=run.state_version,
-            next_state=(
-                RunState.FAILED_TERMINAL if budget_exceeded else RunState.FAILED_RETRYABLE
-            ),
+            next_state=(RunState.FAILED_TERMINAL if budget_exceeded else RunState.FAILED_RETRYABLE),
             progress={**run.progress_json, "failure": error_payload},
         )
 

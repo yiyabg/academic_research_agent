@@ -83,10 +83,7 @@ def _metric(
 
 
 def _ndcg(labels: list[int], ideal_grades: list[int], k: int = 20) -> float:
-    dcg = sum(
-        ((2**label) - 1) / math.log2(index + 2)
-        for index, label in enumerate(labels[:k])
-    )
+    dcg = sum(((2**label) - 1) / math.log2(index + 2) for index, label in enumerate(labels[:k]))
     ideal = sum(
         ((2**label) - 1) / math.log2(index + 2)
         for index, label in enumerate(sorted(ideal_grades, reverse=True)[:k])

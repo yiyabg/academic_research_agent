@@ -66,6 +66,7 @@ async def error_client(
     mock_db_session,
 ) -> AsyncClient:
     """Client with mocked services that raise errors."""
+
     async def override_user_service() -> MagicMock:
         return mock_user_service_with_errors
 

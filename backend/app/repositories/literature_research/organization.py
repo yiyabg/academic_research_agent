@@ -38,9 +38,7 @@ async def create(
 
 
 async def get_by_slug(db: AsyncSession, slug: str) -> ResearchOrganization | None:
-    return await db.scalar(
-        select(ResearchOrganization).where(ResearchOrganization.slug == slug)
-    )
+    return await db.scalar(select(ResearchOrganization).where(ResearchOrganization.slug == slug))
 
 
 async def get_membership(
@@ -51,9 +49,9 @@ async def get_membership(
     for_key_share: bool = False,
 ) -> ResearchOrganizationMember | None:
     query = select(ResearchOrganizationMember).where(
-            ResearchOrganizationMember.organization_id == organization_id,
-            ResearchOrganizationMember.user_id == user_id,
-        )
+        ResearchOrganizationMember.organization_id == organization_id,
+        ResearchOrganizationMember.user_id == user_id,
+    )
     if for_key_share:
         query = query.with_for_update(read=True, key_share=True)
     return await db.scalar(query)

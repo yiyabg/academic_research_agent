@@ -158,9 +158,9 @@ class RunManifest(BaseSchema):
     template_commit: str
     model_versions: dict[str, str] = Field(default_factory=dict)
     llm_usage: dict[str, Any] = Field(default_factory=dict)
-    source_snapshot_hashes: list[
-        Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-    ] = Field(default_factory=list)
+    source_snapshot_hashes: list[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = Field(
+        default_factory=list
+    )
     metric_snapshot_ids: list[UUID] = Field(default_factory=list)
     artifact_hashes: dict[ArtifactFormat, str]
     target_count: int

@@ -60,18 +60,14 @@ def _sanitize_context_value(value: Any, *, path: str) -> tuple[Any, list[str]]:
             ):
                 ignored.append(child_path)
                 continue
-            clean_value, child_ignored = _sanitize_context_value(
-                raw_value, path=child_path
-            )
+            clean_value, child_ignored = _sanitize_context_value(raw_value, path=child_path)
             clean[key] = clean_value
             ignored.extend(child_ignored)
         return clean, ignored
     if isinstance(value, list):
         clean_list = []
         for index, item in enumerate(value):
-            clean_item, child_ignored = _sanitize_context_value(
-                item, path=f"{path}[{index}]"
-            )
+            clean_item, child_ignored = _sanitize_context_value(item, path=f"{path}[{index}]")
             clean_list.append(clean_item)
             ignored.extend(child_ignored)
         return clean_list, ignored
@@ -217,9 +213,7 @@ class ResearchProtocolMemoryContextService:
                     "content_json": _bounded_json(clean_policy),
                 }
             )
-        policy_layer = {
-            "active_policy_context": policy_items
-        }
+        policy_layer = {"active_policy_context": policy_items}
         resolved = resolve_memory_context(
             current_input=_semantic_request_values(request),
             approved_protocol=_approved_semantic_values(approved_protocol),
@@ -230,9 +224,7 @@ class ResearchProtocolMemoryContextService:
         )
         if combined:
             retrieval_mode = (
-                "semantic_plus_recent"
-                if semantic_search_succeeded
-                else "postgres_fallback"
+                "semantic_plus_recent" if semantic_search_succeeded else "postgres_fallback"
             )
         else:
             retrieval_mode = "none"

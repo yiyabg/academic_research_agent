@@ -34,7 +34,9 @@ async def test_render_generation_collects_run_source_and_metric_provenance() -> 
     with (
         patch(
             "app.services.literature_research.pipeline_stages.analysis_repository.get_synthesis",
-            new=AsyncMock(return_value=SimpleNamespace(synthesis_json=synthesis.model_dump(mode="json"))),
+            new=AsyncMock(
+                return_value=SimpleNamespace(synthesis_json=synthesis.model_dump(mode="json"))
+            ),
         ),
         patch(
             "app.services.literature_research.pipeline_stages.analysis_repository.list_analyses",
@@ -73,9 +75,7 @@ async def test_render_generation_collects_run_source_and_metric_provenance() -> 
 
     list_sources.assert_awaited_once_with(stages.db, run_id=run_id)
     list_metrics.assert_awaited_once_with(stages.db, run_id=run_id)
-    list_exclusions.assert_awaited_once_with(
-        stages.db, run_id=run_id, included_work_ids=set()
-    )
+    list_exclusions.assert_awaited_once_with(stages.db, run_id=run_id, included_work_ids=set())
     list_metric_rows.assert_awaited_once_with(stages.db, run_id=run_id)
     render_all.assert_awaited_once()
     call = render_all.await_args

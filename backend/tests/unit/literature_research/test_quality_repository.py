@@ -50,9 +50,7 @@ async def test_find_metric_filters_future_years_and_returns_exact_fact_identity(
     assert observation.metric_year == 2025
     statement = db.execute.await_args.args[0]
     sql = str(
-        statement.compile(
-            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
-        )
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     )
     assert "research_venue_metric_facts.metric_year <= 2026" in sql
     assert "research_venue_metric_facts.metric_year DESC" in sql

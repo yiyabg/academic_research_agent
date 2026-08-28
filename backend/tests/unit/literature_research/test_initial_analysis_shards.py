@@ -26,10 +26,7 @@ async def test_prepare_initial_shards_caps_work_to_run_target_and_pins_full_iden
         protocol_hash="sha256:protocol",
         progress_json={},
     )
-    rows = [
-        (SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4()))
-        for _ in range(4)
-    ]
+    rows = [(SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())) for _ in range(4)]
     db = AsyncMock()
     db.get = AsyncMock(return_value=run)
 
@@ -47,16 +44,13 @@ async def test_prepare_initial_shards_caps_work_to_run_target_and_pins_full_iden
             db_context,
         ),
         patch(
-            "app.worker.tasks.literature_research_tasks.evidence_repo."
-            "list_analysis_ready_versions",
+            "app.worker.tasks.literature_research_tasks.evidence_repo.list_analysis_ready_versions",
             new=AsyncMock(return_value=rows),
         ),
         patch(
             "app.worker.tasks.literature_research_tasks.analysis_repo."
             "get_or_create_initial_analysis_task",
-            new=AsyncMock(
-                side_effect=[(created_tasks[0], True), (created_tasks[1], True)]
-            ),
+            new=AsyncMock(side_effect=[(created_tasks[0], True), (created_tasks[1], True)]),
         ) as create_task,
         patch(
             "app.worker.tasks.literature_research_tasks.analysis_repo."
@@ -141,9 +135,7 @@ def test_analyzing_stage_dispatches_independent_stable_shards() -> None:
             "app.worker.tasks.literature_research_tasks.finalize_research_analysis.apply_async"
         ) as finalize_apply,
     ):
-        result = execute_research_stage.apply(
-            args=(str(run_id), "ANALYZING"), throw=True
-        ).get()
+        result = execute_research_stage.apply(args=(str(run_id), "ANALYZING"), throw=True).get()
 
     assert result["status"] == "SHARDS_SCHEDULED"
     assert result["scheduled_shard_count"] == 2
@@ -155,6 +147,8 @@ def test_analyzing_stage_dispatches_independent_stable_shards() -> None:
             "task_id": stable_analysis_task_id(run_id, UUID(work_id)),
         }
     finalize_apply.assert_called_once_with(args=(str(run_id),), queue="research-llm")
+
+
 @pytest.mark.anyio
 async def test_analysis_barrier_rejects_nonterminal_shards() -> None:
     counts = {
@@ -166,11 +160,14 @@ async def test_analysis_barrier_rejects_nonterminal_shards() -> None:
         "running": 0,
         "failed_retryable": 0,
     }
-    with patch(
-        "app.services.literature_research.pipeline_stages."
-        "analysis_repository.summarize_initial_analysis_tasks",
-        new=AsyncMock(return_value=counts),
-    ), pytest.raises(RuntimeError, match="barrier is not complete"):
+    with (
+        patch(
+            "app.services.literature_research.pipeline_stages."
+            "analysis_repository.summarize_initial_analysis_tasks",
+            new=AsyncMock(return_value=counts),
+        ),
+        pytest.raises(RuntimeError, match="barrier is not complete"),
+    ):
         await ResearchPipelineStages(AsyncMock()).analyze(SimpleNamespace(id=uuid4()))
 
 

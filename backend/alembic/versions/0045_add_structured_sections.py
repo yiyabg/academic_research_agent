@@ -6,6 +6,7 @@ Create Date: 2026-08-23
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0045_add_structured_sections"

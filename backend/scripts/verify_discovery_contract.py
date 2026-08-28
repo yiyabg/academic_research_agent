@@ -22,42 +22,46 @@ from app.services.literature_research.query_planner import QueryPlannerService
 
 
 async def verify() -> dict[str, object]:
-    protocol = ProtocolCompilerService().compile(
-        ProtocolCompileRequest(
-            topic="auditable research agents",
-            as_of_date=date(2026, 8, 22),
-            allowed_types=[
-                DocumentType.JOURNAL_ARTICLE,
-                DocumentType.CONFERENCE_PAPER,
-            ],
-            must_have_facets=[
-                TopicFacet(
-                    facet_id="auditability",
-                    name="audit trail",
-                    description="The system exposes an inspectable audit trail.",
-                )
-            ],
-            should_have_facets=[
-                TopicFacet(
-                    facet_id="evidence",
-                    name="evidence provenance",
-                    description="Claims link to source evidence.",
-                )
-            ],
-            exclude_facets=[
-                ExclusionFacet(
-                    facet_id="shopping",
-                    description="Consumer shopping assistants are excluded.",
-                )
-            ],
-            synonym_groups=[
-                SynonymGroup(
-                    concept="research agents",
-                    terms=["research assistants", "literature review agents"],
-                )
-            ],
+    protocol = (
+        ProtocolCompilerService()
+        .compile(
+            ProtocolCompileRequest(
+                topic="auditable research agents",
+                as_of_date=date(2026, 8, 22),
+                allowed_types=[
+                    DocumentType.JOURNAL_ARTICLE,
+                    DocumentType.CONFERENCE_PAPER,
+                ],
+                must_have_facets=[
+                    TopicFacet(
+                        facet_id="auditability",
+                        name="audit trail",
+                        description="The system exposes an inspectable audit trail.",
+                    )
+                ],
+                should_have_facets=[
+                    TopicFacet(
+                        facet_id="evidence",
+                        name="evidence provenance",
+                        description="Claims link to source evidence.",
+                    )
+                ],
+                exclude_facets=[
+                    ExclusionFacet(
+                        facet_id="shopping",
+                        description="Consumer shopping assistants are excluded.",
+                    )
+                ],
+                synonym_groups=[
+                    SynonymGroup(
+                        concept="research agents",
+                        terms=["research assistants", "literature review agents"],
+                    )
+                ],
+            )
         )
-    ).protocol
+        .protocol
+    )
     plan = QueryPlannerService().plan(protocol)
     assert len(plan.queries) == 1
     assert plan.candidate_limit == 35

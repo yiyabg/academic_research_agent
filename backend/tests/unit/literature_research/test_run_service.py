@@ -24,7 +24,9 @@ def service() -> ResearchRunService:
 
 def request() -> ResearchRunCreate:
     return ResearchRunCreate(
-        project_id=uuid4(), protocol_version=1, client_request_id="client-request-0001",
+        project_id=uuid4(),
+        protocol_version=1,
+        client_request_id="client-request-0001",
         execution_mode=ExecutionMode.SEARCH_ONLY,
     )
 

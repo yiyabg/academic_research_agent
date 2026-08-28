@@ -7,7 +7,7 @@ import { PageTransition } from "@/components/layout/page-transition";
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
     <AuthGuard>
-      <div className="flex h-screen flex-col">
+      <div className="flex h-screen flex-col overflow-hidden">
         <Header />
         <Sidebar />
         <main

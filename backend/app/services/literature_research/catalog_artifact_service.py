@@ -84,9 +84,7 @@ class CatalogArtifactService:
             )
         return artifacts
 
-    async def validate_persisted(
-        self, run_id: UUID, *, generation: int = 1
-    ) -> list[str]:
+    async def validate_persisted(self, run_id: UUID, *, generation: int = 1) -> list[str]:
         """Verify exactly the four catalog outputs without full-research release checks."""
         rows = await analysis_repository.list_artifacts(
             self.db,
@@ -101,7 +99,9 @@ class CatalogArtifactService:
             if format_.value not in by_format
         ]
         extra_formats = set(by_format) - {format_.value for format_ in CATALOG_ARTIFACT_FORMATS}
-        errors.extend(f"unexpected catalog artifact: {format_name}" for format_name in extra_formats)
+        errors.extend(
+            f"unexpected catalog artifact: {format_name}" for format_name in extra_formats
+        )
         artifacts: list[RenderedArtifact] = []
         for format_ in CATALOG_ARTIFACT_FORMATS:
             row = by_format.get(format_.value)

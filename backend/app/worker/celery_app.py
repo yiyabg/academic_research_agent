@@ -46,6 +46,9 @@ celery_app.conf.update(
         "app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_staged": {
             "queue": "research-llm"
         },
+        "app.worker.tasks.local_paper_library_tasks.recover_local_paper_analysis_background": {
+            "queue": "research-llm"
+        },
         "app.worker.tasks.local_paper_library_tasks.check_scheduled_local_paper_syncs": {
             "queue": "research-cpu"
         },

@@ -77,7 +77,11 @@ async def fixture_root_count(*, run_id: UUID, project_id: UUID, user_id: UUID) -
     async with async_session_maker() as db:
         counts = [
             await db.scalar(select(func.count()).select_from(model).where(model.id == row_id))
-            for model, row_id in ((ResearchRun, run_id), (ResearchProject, project_id), (User, user_id))
+            for model, row_id in (
+                (ResearchRun, run_id),
+                (ResearchProject, project_id),
+                (User, user_id),
+            )
         ]
     return sum(int(value or 0) for value in counts)
 
@@ -294,7 +298,9 @@ async def main() -> None:
             )
             markdown = next(item for item in artifacts if item.format == "markdown")
             markdown_bytes = await store.get(markdown.object_key)
-            require(b"Not performed: PDF acquisition" in markdown_bytes, "Catalog scope notice missing")
+            require(
+                b"Not performed: PDF acquisition" in markdown_bytes, "Catalog scope notice missing"
+            )
             current_run = await db.get(ResearchRun, run_id)
             require(current_run is not None, "Run disappeared")
             selection = current_run.progress_json.get("catalog_selection")
@@ -314,7 +320,10 @@ async def main() -> None:
                     )
                     or 0
                 )
-            require(forbidden_row_count == 0, "Search-only catalog unexpectedly created PDF/analysis rows")
+            require(
+                forbidden_row_count == 0,
+                "Search-only catalog unexpectedly created PDF/analysis rows",
+            )
             output = {
                 "artifact_formats": sorted(item.format for item in artifacts),
                 "catalog_selected_count": len(selection),

@@ -72,8 +72,7 @@ async def list_recent_project_memories(
         .where(
             ResearchProjectMemory.project_id == project_id,
             ResearchProjectMemory.valid_from <= now,
-            (ResearchProjectMemory.valid_to.is_(None))
-            | (ResearchProjectMemory.valid_to >= now),
+            (ResearchProjectMemory.valid_to.is_(None)) | (ResearchProjectMemory.valid_to >= now),
         )
         .order_by(ResearchProjectMemory.created_at.desc())
         .limit(limit)
@@ -93,8 +92,7 @@ async def list_project_memories_by_ids(
             ResearchProjectMemory.project_id == project_id,
             ResearchProjectMemory.id.in_(memory_ids),
             ResearchProjectMemory.valid_from <= now,
-            (ResearchProjectMemory.valid_to.is_(None))
-            | (ResearchProjectMemory.valid_to >= now),
+            (ResearchProjectMemory.valid_to.is_(None)) | (ResearchProjectMemory.valid_to >= now),
         )
     )
     by_id = {item.id: item for item in result.scalars().all()}
@@ -160,9 +158,7 @@ async def create_policy_version(
             ResearchPolicyVersion.policy_key == body.policy_key
         )
     )
-    canonical = json.dumps(
-        body.content, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    canonical = json.dumps(body.content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     row = ResearchPolicyVersion(
         policy_key=body.policy_key,
         version=int(version or 0) + 1,
@@ -184,9 +180,7 @@ async def list_policy_versions(
     if policy_key is not None:
         query = query.where(ResearchPolicyVersion.policy_key == policy_key)
     result = await db.execute(
-        query.order_by(
-            ResearchPolicyVersion.policy_key.asc(), ResearchPolicyVersion.version.desc()
-        )
+        query.order_by(ResearchPolicyVersion.policy_key.asc(), ResearchPolicyVersion.version.desc())
     )
     return list(result.scalars().all())
 
@@ -199,8 +193,7 @@ async def list_active_policy_versions(db: AsyncSession) -> list[ResearchPolicyVe
         .where(
             ResearchPolicyVersion.status == "ACTIVE",
             ResearchPolicyVersion.valid_from <= now,
-            (ResearchPolicyVersion.valid_to.is_(None))
-            | (ResearchPolicyVersion.valid_to >= now),
+            (ResearchPolicyVersion.valid_to.is_(None)) | (ResearchPolicyVersion.valid_to >= now),
         )
         .order_by(
             ResearchPolicyVersion.policy_key.asc(),

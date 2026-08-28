@@ -320,6 +320,9 @@ class Settings(BaseSettings):
     LOCAL_PAPER_ANALYSIS_REASONING_EFFORT: Literal["low", "medium", "high"] = "low"
     LOCAL_PAPER_ANALYSIS_PAPER_MAX_OUTPUT_TOKENS: int = Field(default=1200, ge=128, le=4096)
     LOCAL_PAPER_ANALYSIS_SYNTHESIS_MAX_OUTPUT_TOKENS: int = Field(default=1600, ge=128, le=4096)
+    LOCAL_PAPER_ANALYSIS_MIN_EVIDENCE_PER_PAPER: int = Field(default=2, ge=1, le=12)
+    LOCAL_PAPER_ANALYSIS_MAX_EVIDENCE_PER_PAPER: int = Field(default=6, ge=1, le=20)
+    LOCAL_PAPER_ANALYSIS_EVIDENCE_TOKEN_BUDGET: int = Field(default=4000, ge=256, le=16000)
     LOCAL_PAPER_ANALYSIS_BACKGROUND_SUBMIT_TIMEOUT_SECONDS: float = Field(
         default=30.0, ge=5.0, le=119.0
     )
@@ -334,7 +337,7 @@ class Settings(BaseSettings):
     LOCAL_PAPER_RERANK_CANDIDATE_LIMIT: int = Field(default=60, ge=5, le=200)
     # Recall is chunk-based, but a single long paper must not consume the
     # reranker budget.  Diversity begins before reranking, not afterwards.
-    LOCAL_PAPER_MAX_RERANK_CHUNKS_PER_PAPER: int = Field(default=2, ge=1, le=10)
+    LOCAL_PAPER_MAX_RERANK_CHUNKS_PER_PAPER: int = Field(default=6, ge=1, le=20)
     LOCAL_PAPER_EVIDENCE_PER_PAPER: int = Field(default=2, ge=1, le=5)
     # Running headers and one-line figure captions often contain the query
     # terms verbatim but are not enough to support a research conclusion.

@@ -40,9 +40,7 @@ class ResearchRelevanceScore(Base, TimestampMixin):
     decision: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     model_versions_json: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False)
     reasons_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
-    facet_judgement_json: Mapped[dict[str, object] | None] = mapped_column(
-        JSONB, nullable=True
-    )
+    facet_judgement_json: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
 
 
 class ResearchFullTextAcquisition(Base, TimestampMixin):

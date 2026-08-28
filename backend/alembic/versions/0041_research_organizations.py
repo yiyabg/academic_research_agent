@@ -30,9 +30,7 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["created_by"], ["users.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["created_by"], ["users.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
@@ -59,9 +57,7 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint(
-            "role IN ('OWNER', 'MEMBER')", name="ck_research_org_member_role"
-        ),
+        sa.CheckConstraint("role IN ('OWNER', 'MEMBER')", name="ck_research_org_member_role"),
         sa.ForeignKeyConstraint(
             ["organization_id"],
             ["research_organizations.id"],
@@ -69,9 +65,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "organization_id", "user_id", name="uq_research_organization_member"
-        ),
+        sa.UniqueConstraint("organization_id", "user_id", name="uq_research_organization_member"),
     )
     op.create_index(
         "research_organization_members_organization_id_idx",
@@ -102,9 +96,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "research_runs_organization_id_fkey", "research_runs", type_="foreignkey"
-    )
+    op.drop_constraint("research_runs_organization_id_fkey", "research_runs", type_="foreignkey")
     op.drop_constraint(
         "research_projects_organization_id_fkey",
         "research_projects",
@@ -120,7 +112,5 @@ def downgrade() -> None:
     )
     op.drop_table("research_organization_members")
     op.drop_index("research_organizations_slug_idx", table_name="research_organizations")
-    op.drop_index(
-        "research_organizations_created_by_idx", table_name="research_organizations"
-    )
+    op.drop_index("research_organizations_created_by_idx", table_name="research_organizations")
     op.drop_table("research_organizations")

@@ -63,9 +63,7 @@ async def expect_status(response: httpx.Response, expected: int) -> None:
         raise RuntimeError(f"Expected HTTP {expected}; {response_failure(response)}")
 
 
-async def checked_object(
-    response: httpx.Response, *, expected: int = 200
-) -> dict[str, Any]:
+async def checked_object(response: httpx.Response, *, expected: int = 200) -> dict[str, Any]:
     await expect_status(response, expected)
     payload = response.json()
     if not isinstance(payload, dict):
@@ -134,8 +132,7 @@ async def create_validate_only_run(
     )
     approved = await checked_object(
         await owner.post(
-            f"/api/v1/research/projects/{project_id}/protocols/"
-            f"{protocol['version']}:approve",
+            f"/api/v1/research/projects/{project_id}/protocols/{protocol['version']}:approve",
             json={"protocol_hash": protocol["protocol_hash"]},
         )
     )
@@ -153,9 +150,7 @@ async def create_validate_only_run(
     )
     deadline = asyncio.get_running_loop().time() + 90
     while asyncio.get_running_loop().time() < deadline:
-        run = await checked_object(
-            await owner.get(f"/api/v1/research/runs/{run['id']}")
-        )
+        run = await checked_object(await owner.get(f"/api/v1/research/runs/{run['id']}"))
         if run["state"] == "COMPLETED":
             return approved, run
         if run["state"] in {"FAILED_RETRYABLE", "FAILED_TERMINAL", "CANCELLED"}:
@@ -270,9 +265,7 @@ async def cleanup(
                 )
             )
             await db.execute(
-                delete(ResearchProjectMemory).where(
-                    ResearchProjectMemory.project_id == project_id
-                )
+                delete(ResearchProjectMemory).where(ResearchProjectMemory.project_id == project_id)
             )
             await db.execute(delete(ResearchRun).where(ResearchRun.project_id == project_id))
             await db.execute(delete(ResearchProject).where(ResearchProject.id == project_id))
@@ -284,18 +277,16 @@ async def cleanup(
             await db.execute(delete(User).where(User.id.in_(list(user_ids.values()))))
         remaining_users = int(
             await db.scalar(
-                select(func.count()).select_from(User).where(
-                    User.id.in_(list(user_ids.values()))
-                )
+                select(func.count()).select_from(User).where(User.id.in_(list(user_ids.values())))
             )
             or 0
         )
         remaining_projects = (
             int(
                 await db.scalar(
-                    select(func.count()).select_from(ResearchProject).where(
-                        ResearchProject.id == project_id
-                    )
+                    select(func.count())
+                    .select_from(ResearchProject)
+                    .where(ResearchProject.id == project_id)
                 )
                 or 0
             )
@@ -305,9 +296,9 @@ async def cleanup(
         remaining_policies = (
             int(
                 await db.scalar(
-                    select(func.count()).select_from(ResearchPolicyVersion).where(
-                        ResearchPolicyVersion.id == policy_id
-                    )
+                    select(func.count())
+                    .select_from(ResearchPolicyVersion)
+                    .where(ResearchPolicyVersion.id == policy_id)
                 )
                 or 0
             )
@@ -377,9 +368,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             "source_message_ids": [],
         }
         l1 = await checked_object(
-            await owner_frontend.put(
-                f"/api/research/sessions/{session_id}/memory", json=l1_body
-            )
+            await owner_frontend.put(f"/api/research/sessions/{session_id}/memory", json=l1_body)
         )
         require(l1["user_id"] == str(user_ids["owner"]), "BFF wrote L1 under wrong user")
         require(l1["expires_in_seconds"] == 86400, "L1 TTL contract changed")
@@ -387,9 +376,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             await owner.get(f"/api/v1/research/sessions/{session_id}/memory")
         )
         require(owner_l1["draft_slots"] == l1_body["draft_slots"], "Redis L1 did not round-trip")
-        outsider_l1 = await outsider.get(
-            f"/api/v1/research/sessions/{session_id}/memory"
-        )
+        outsider_l1 = await outsider.get(f"/api/v1/research/sessions/{session_id}/memory")
         await expect_status(outsider_l1, 200)
         require(outsider_l1.json() is None, "L1 memory leaked across users")
         await expect_status(
@@ -429,9 +416,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             ),
             422,
         )
-        proxied_profile = await checked_object(
-            await owner_frontend.get("/api/research/me/profile")
-        )
+        proxied_profile = await checked_object(await owner_frontend.get("/api/research/me/profile"))
         require(proxied_profile["version"] == 2, "BFF did not expose latest L3 profile")
 
         now = datetime.now(UTC)
@@ -538,9 +523,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
         )
         require(len(draft["payload_hash"]) == 64, "Gold snapshot hash missing")
         await expect_status(
-            await owner.post(
-                f"/api/v1/research/runs/{run['id']}/evaluations/{draft['id']}"
-            ),
+            await owner.post(f"/api/v1/research/runs/{run['id']}/evaluations/{draft['id']}"),
             409,
         )
 
@@ -577,9 +560,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
             expected=201,
         )
         report = await checked_object(
-            await owner.post(
-                f"/api/v1/research/runs/{run['id']}/evaluations/{adjudicated['id']}"
-            ),
+            await owner.post(f"/api/v1/research/runs/{run['id']}/evaluations/{adjudicated['id']}"),
             expected=201,
         )
         require(report["dataset_hash"] == adjudicated["payload_hash"], "Evaluation lost hash")
@@ -592,9 +573,7 @@ async def main(base_url: str, frontend_base_url: str) -> None:
         )
         require(report["id"] in {item["id"] for item in listed_reports}, "Report not persisted")
         await expect_status(
-            await outsider.get(
-                f"/api/v1/research/projects/{project_id}/evaluation-datasets"
-            ),
+            await outsider.get(f"/api/v1/research/projects/{project_id}/evaluation-datasets"),
             404,
         )
 

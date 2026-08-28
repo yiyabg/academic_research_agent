@@ -2,11 +2,14 @@
 
 Provides independent per-paper evidence with token budgets and context construction.
 """
+# ruff: noqa: RUF001 - Chinese sentence punctuation is part of the context boundary grammar.
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -16,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models.local_paper_library import LocalPaper
+
+try:
+    import tiktoken
+except ImportError:  # pragma: no cover - uv lock installs tiktoken in production
+    tiktoken = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from app.services.literature_research.local_paper_retrieval import (
@@ -51,6 +59,8 @@ class PaperEvidenceResult:
 
     paper_id: UUID
     paper_title: str
+    paper_citekey: str
+    document_version_id: UUID | None
     evidence: list[AnalysisEvidence]
     insufficient_evidence: bool
     queries_used: list[str]
@@ -70,9 +80,17 @@ class LocalPaperEvidenceRetriever:
         self,
         db: AsyncSession,
         chunk_retriever: LocalPaperChunkRetriever,
+        token_counter: Callable[[str], int] | None = None,
     ) -> None:
         self.db = db
         self.chunk_retriever = chunk_retriever
+        self.token_counter = token_counter or self._default_token_count
+
+    @staticmethod
+    def _default_token_count(text: str) -> int:
+        if tiktoken is not None:
+            return len(tiktoken.get_encoding("cl100k_base").encode(text))
+        return max(1, len(text) // 4)
 
     async def retrieve_for_papers(
         self,
@@ -81,8 +99,8 @@ class LocalPaperEvidenceRetriever:
         question: str,
         query_context: str | None = None,
         collection: str,
-        max_evidence_per_paper: int = 6,
-        target_tokens_per_paper: int = 4000,
+        max_evidence_per_paper: int = settings.LOCAL_PAPER_ANALYSIS_MAX_EVIDENCE_PER_PAPER,
+        target_tokens_per_paper: int = settings.LOCAL_PAPER_ANALYSIS_EVIDENCE_TOKEN_BUDGET,
     ) -> list[PaperEvidenceResult]:
         """Retrieve evidence for each paper independently.
 
@@ -102,14 +120,18 @@ class LocalPaperEvidenceRetriever:
 
         # Load paper metadata
         papers = (
-            await self.db.execute(
-                select(LocalPaper).where(
-                    LocalPaper.id.in_(paper_ids),
-                    LocalPaper.status == "INDEXED",
-                    LocalPaper.active_document_version_id.isnot(None),
+            (
+                await self.db.execute(
+                    select(LocalPaper).where(
+                        LocalPaper.id.in_(paper_ids),
+                        LocalPaper.status == "INDEXED",
+                        LocalPaper.active_document_version_id.isnot(None),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         paper_map = {p.id: p for p in papers}
 
@@ -120,6 +142,8 @@ class LocalPaperEvidenceRetriever:
                     PaperEvidenceResult(
                         paper_id=paper_id,
                         paper_title=paper.title if paper else "Unknown",
+                        paper_citekey=paper.citekey if paper else "",
+                        document_version_id=paper.active_document_version_id if paper else None,
                         evidence=[],
                         insufficient_evidence=True,
                         queries_used=[question],
@@ -144,7 +168,9 @@ class LocalPaperEvidenceRetriever:
             )
 
             queries_used = [question]
-            insufficient = len(selected_evidence) == 0
+            insufficient = (
+                len(selected_evidence) < settings.LOCAL_PAPER_ANALYSIS_MIN_EVIDENCE_PER_PAPER
+            )
 
             # Bounded補充 retrieval if insufficient
             if insufficient and query_context:
@@ -160,24 +186,46 @@ class LocalPaperEvidenceRetriever:
                     rerank_limit=20,
                 )
 
+                # A supplementary query is one bounded recall pass.  Merge it
+                # with the first pass before ranking/budgeting so good first
+                # pass evidence cannot vanish and duplicate children collapse.
+                merged: dict[UUID, RetrievedChunk] = {
+                    chunk.chunk_id: chunk for chunk in main_chunks
+                }
+                for chunk in 補充_chunks:
+                    merged.setdefault(chunk.chunk_id, chunk)
                 selected_evidence = self._select_diverse_evidence(
-                    chunks=補充_chunks,
+                    chunks=sorted(
+                        merged.values(), key=lambda chunk: chunk.rerank_score or 0.0, reverse=True
+                    ),
                     max_chunks=max_evidence_per_paper,
                     target_tokens=target_tokens_per_paper,
                 )
 
-                insufficient = len(selected_evidence) == 0
+                insufficient = (
+                    len(selected_evidence) < settings.LOCAL_PAPER_ANALYSIS_MIN_EVIDENCE_PER_PAPER
+                )
 
             # Build context around each child
+            main_ids = {chunk.chunk_id for chunk in main_chunks}
+            # Context is allocated across the selected evidence set, not with
+            # an unrelated character cap on each parent section.
+            per_evidence_budget = max(1, target_tokens_per_paper // max(1, len(selected_evidence)))
             evidence_with_context = [
-                self._build_evidence_with_context(chunk, retrieval_pass=1 if not query_context or idx < len(main_chunks) else 2)
-                for idx, chunk in enumerate(selected_evidence)
+                self._build_evidence_with_context(
+                    chunk,
+                    retrieval_pass=1 if chunk.chunk_id in main_ids else 2,
+                    context_token_budget=per_evidence_budget,
+                )
+                for chunk in selected_evidence
             ]
 
             results.append(
                 PaperEvidenceResult(
                     paper_id=paper_id,
                     paper_title=paper.title,
+                    paper_citekey=paper.citekey,
+                    document_version_id=paper.active_document_version_id,
                     evidence=evidence_with_context,
                     insufficient_evidence=insufficient,
                     queries_used=queries_used,
@@ -221,8 +269,7 @@ class LocalPaperEvidenceRetriever:
             if len(selected) >= max_chunks:
                 break
 
-            # Estimate tokens (BGE tokenizer not available here, use char/4 heuristic)
-            chunk_tokens = len(chunk.content) // 4
+            chunk_tokens = self.token_counter(chunk.content)
 
             # Stop if adding this would significantly exceed budget
             if total_tokens > 0 and total_tokens + chunk_tokens > target_tokens * 1.2:
@@ -251,6 +298,7 @@ class LocalPaperEvidenceRetriever:
         self,
         chunk: RetrievedChunk,
         retrieval_pass: int,
+        context_token_budget: int,
     ) -> AnalysisEvidence:
         """Build evidence with context around child position.
 
@@ -277,26 +325,26 @@ class LocalPaperEvidenceRetriever:
             # Child not found in parent (shouldn't happen, but safe fallback)
             context_text = child_text
         else:
-            # Expand context around child position
-            # Target: ~1500 chars total (child + surrounding context)
-            target_context_chars = 1500
-            child_len = len(child_text)
-
-            if child_len >= target_context_chars:
-                # Child itself fills budget
+            # Keep the entire hit, then expand outward at paragraph/sentence
+            # boundaries until its share of the paper budget is reached.
+            if self.token_counter(child_text) >= context_token_budget:
                 context_text = child_text
             else:
-                # Expand before and after
-                remaining = target_context_chars - child_len
-                before_budget = remaining // 2
-                after_budget = remaining - before_budget
-
-                start = max(0, child_pos - before_budget)
-                end = min(len(parent_text), child_pos + child_len + after_budget)
-
-                context_text = parent_text[start:end]
-
-                # Ensure child is fully included (should always be true)
+                start, end = child_pos, child_pos + len(child_text)
+                boundaries = [
+                    match.end() for match in re.finditer(r"(?:\n\s*\n|[.!?。！？])", parent_text)
+                ]
+                for boundary in reversed([value for value in boundaries if value <= start]):
+                    candidate = parent_text[boundary:end].strip()
+                    if self.token_counter(candidate) > context_token_budget:
+                        break
+                    start = boundary
+                for boundary in [value for value in boundaries if value >= end]:
+                    candidate = parent_text[start:boundary].strip()
+                    if self.token_counter(candidate) > context_token_budget:
+                        break
+                    end = boundary
+                context_text = parent_text[start:end].strip()
                 if child_text not in context_text:
                     context_text = child_text
 

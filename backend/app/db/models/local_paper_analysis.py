@@ -100,7 +100,9 @@ class LocalPaperAnalysisStage(Base, TimestampMixin):
 
     __tablename__ = "local_paper_analysis_stages"
     __table_args__ = (
-        UniqueConstraint("job_id", "stage_type", "stage_index", name="uq_local_paper_analysis_stage"),
+        UniqueConstraint(
+            "job_id", "stage_type", "stage_index", name="uq_local_paper_analysis_stage"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -111,7 +113,10 @@ class LocalPaperAnalysisStage(Base, TimestampMixin):
         index=True,
     )
     paper_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("local_papers.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("local_papers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     stage_type: Mapped[str] = mapped_column(String(24), nullable=False)
     stage_index: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -194,7 +199,10 @@ class LocalPaperAnalysisLLMAttempt(Base, TimestampMixin):
         index=True,
     )
     paper_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("local_papers.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("local_papers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)

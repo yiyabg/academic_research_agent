@@ -28,8 +28,12 @@ def _preload_docling_artifacts(cache_dir: Path) -> Path:
         ],
         check=True,
     )
-    layout_dirs = [path for path in artifacts_dir.iterdir() if path.is_dir() and "layout" in path.name]
-    table_model = artifacts_dir / "docling-project--docling-models" / "model_artifacts" / "tableformer"
+    layout_dirs = [
+        path for path in artifacts_dir.iterdir() if path.is_dir() and "layout" in path.name
+    ]
+    table_model = (
+        artifacts_dir / "docling-project--docling-models" / "model_artifacts" / "tableformer"
+    )
     if not any((path / "config.json").is_file() for path in layout_dirs):
         raise RuntimeError("Docling layout artifact is missing config.json after prefetch")
     if not table_model.exists():
